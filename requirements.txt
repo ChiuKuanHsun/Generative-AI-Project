@@ -1,5 +1,5 @@
 anthropic
-edge-tts
+requests
 moviepy==2.1.1
 plotly
 kaleido
@@ -7,4 +7,4 @@ Pillow
 python-dotenv
 numpy
 mutagen
-# openai-whisper  # 未來加字幕動畫時啟用：pip install openai-whisper
+# openai-whisper  # future: animated karaoke subtitles

@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip list *)",
+      "Bash(pip install *)",
+      "Bash(python -c \"import news_fetcher, chart_generator, tts_generator, video_composer; print\\('All modules import OK'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -m venv \"D:/video generator/.venv\")",
+      "Bash(D:/video generator/.venv/Scripts/pip.exe install *)",
+      "Bash(\"D:/video generator/.venv/Scripts/pip.exe\" list)",
+      "Bash(D:/video generator/.venv/Scripts/python.exe *)",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(git config *)",
+      "Bash(\".venv/Scripts/python.exe\" -c \"import video_composer; print\\('OK'\\)\")",
+      "Bash(\".venv/Scripts/python.exe\" -c \"import video_composer; print\\('import ok'\\)\")",
+      "Bash(\".venv/Scripts/python.exe\" -c \"import main; print\\('OK'\\)\")",
+      "Bash(\".venv/Scripts/python.exe\" -c \"import main, news_fetcher, chart_generator, tts_generator, video_composer; print\\('All modules OK'\\)\")",
+      "Bash(\".venv/Scripts/pip.exe\" install *)",
+      "Bash(.venv/Scripts/pip uninstall *)"
+    ]
+  }
+}

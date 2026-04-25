@@ -1,0 +1,51 @@
+{
+  "topic": "比特币突破74K — 美伊谈判引爆涨势",
+  "summary": "比特币飙涨近5%突破74K创2025年新高，美伊谈判提振风险情绪，80K成市场焦点。",
+  "dialogue": [
+    {
+      "role": "gugugaga",
+      "line": "比特币昨晚暴涨5%，直接突破74K，今年新高。美伊谈判就是这波的导火索。",
+      "emotion": "calm"
+    },
+    {
+      "role": "meowchan",
+      "line": "等等，美伊谈判跟比特币有啥关系？感觉八竿子打不着啊。",
+      "emotion": "confused"
+    },
+    {
+      "role": "gugugaga",
+      "line": "典型新手问题。地缘风险上升机构往避险资产跑，比特币现在就在这个篮子里。风险降了资金就回流追涨。",
+      "emotion": "sarcastic"
+    },
+    {
+      "role": "meowchan",
+      "line": "那我现在买会不会买在顶部啊？",
+      "emotion": "curious"
+    },
+    {
+      "role": "gugugaga",
+      "line": "技术面看77K-78K是第一压力，80K是心理关口。协议签了冲80K，谈崩就回踩70K。机构吸筹散户割肉，你懂的。",
+      "emotion": "serious"
+    },
+    {
+      "role": "meowchan",
+      "line": "以太坊呢？我看它还趴在2300附近，会跟涨吗？",
+      "emotion": "learning"
+    },
+    {
+      "role": "gugugaga",
+      "line": "ETH从2157低点反弹到2329，但历来比比特币慢半拍。等BTC站稳80K再说，别急。",
+      "emotion": "calm"
+    },
+    {
+      "role": "meowchan",
+      "line": "明白了！盯着美伊协议进展和BTC能不能破80K就行？",
+      "emotion": "surprised"
+    },
+    {
+      "role": "gugugaga",
+      "line": "对。另外看期货未平仓和链上资金流向，机构信号很强。谈崩跌得快，记住：不要追没确认的突破。",
+      "emotion": "serious"
+    }
+  ]
+}
