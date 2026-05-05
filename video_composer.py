@@ -29,7 +29,7 @@ VIDEO_HEIGHT = 1280
 FPS = 24
 BG_COLOR = (10, 10, 18)
 BG_VIDEO_DIR = "backgrounds"
-BG_DIM = 0.35
+BG_DIM = 0.65
 
 # ── Layout boxes (x1, y1, x2, y2) ─────────────────────────────────────────────
 TOPIC_BAR    = (0,    0,   720,   80)
@@ -475,15 +475,43 @@ def compose_video(
     audio_data: list,
     topic: str,
     chart_path: str | None = None,
+    image_paths: list[str] | str | None = None,
     output_path: str = "output.mp4",
     end_card_duration: float = 4.0,
 ) -> str:
-    """Stitch dialogue clips + end card into the final mp4."""
+    """Stitch dialogue clips + end card into the final mp4.
+
+    image_paths: list of news images for the dialogue content area; rotated across
+                 dialogue lines so the same picture isn't on screen the whole video.
+                 Falls back to the chart if empty/None. Accepts a single string for
+                 backwards compatibility.
+    chart_path:  data chart, used on the end card and as the dialogue fallback.
+    """
     print(f"\nComposing video ({len(audio_data)} dialogue segments)...")
 
     chart_img = None
     if chart_path and os.path.exists(chart_path):
         chart_img = Image.open(chart_path).convert("RGB")
+
+    if isinstance(image_paths, str):
+        image_paths = [image_paths]
+    image_paths = image_paths or []
+
+    dialogue_imgs: list[Image.Image] = []
+    for p in image_paths:
+        if p and os.path.exists(p):
+            try:
+                dialogue_imgs.append(Image.open(p).convert("RGB"))
+            except Exception as e:
+                print(f"  Could not load {p}: {e}")
+
+    if dialogue_imgs:
+        print(f"  Dialogue images: {len(dialogue_imgs)} (rotating across lines)")
+    elif chart_img is not None:
+        print("  No news images available — using chart in content area.")
+        dialogue_imgs = [chart_img]
+    else:
+        dialogue_imgs = [None]  # placeholder will be drawn
 
     bg_video = _load_bg_video()
     clips = []
@@ -491,15 +519,16 @@ def compose_video(
     for i, item in enumerate(audio_data):
         print(f"  [{i+1}/{len(audio_data)}] {item['role']}: {item['line'][:30]}...")
         duration = item["duration"]
+        dialogue_img = dialogue_imgs[i % len(dialogue_imgs)]
 
         if bg_video is not None:
             bg_sub = _random_subclip(bg_video, duration)
             video_clip = _build_dialogue_clip(
-                bg_sub, item["role"], item["line"], topic, chart_img, duration
+                bg_sub, item["role"], item["line"], topic, dialogue_img, duration
             )
         else:
             video_clip = _build_solid_clip(
-                item["role"], item["line"], topic, chart_img, duration
+                item["role"], item["line"], topic, dialogue_img, duration
             )
 
         audio_clip = AudioFileClip(item["audio_path"])

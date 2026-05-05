@@ -20,13 +20,32 @@ try:
 except ImportError:
     _HAS_MUTAGEN = False
 
+# Optional Traditional → Simplified converter. Captions display Traditional, but
+# VITS-Umamusume's tokenizer is trained on Simplified, so we convert only the
+# string sent to TTS.
+try:
+    from zhconv import convert as _zh_convert
+except ImportError:
+    _zh_convert = None
+
 # ── VITS Umamusume config ─────────────────────────────────────────────────────
 # Space runs Gradio 5.x — endpoints are under /gradio_api with SSE result polling.
 VITS_SPACE_URL = "https://plachta-vits-umamusume-voice-synthesizer.hf.space"
 VITS_API_PREFIX = "/gradio_api"
 VITS_API_NAME  = "tts_fn"     # Gradio api_name for main TTS
 VITS_LANGUAGE  = "简体中文"   # Other options: "日本語", "English"
+VITS_SPEED     = 1.3          # 1.0 = baseline; 1.3 ≈ 30% faster speech + captions
 VITS_TIMEOUT   = 180
+
+
+def _to_simplified(text: str) -> str:
+    """Convert Traditional → Simplified for VITS. No-op if zhconv is missing."""
+    if _zh_convert is None:
+        return text
+    try:
+        return _zh_convert(text, "zh-cn")
+    except Exception:
+        return text
 
 # Populated at runtime by set_vits_voices() — called from main.py on startup
 VITS_VOICES: dict[str, str] = {
@@ -77,8 +96,9 @@ def get_vits_speakers() -> list[str]:
 
 def _vits_synthesize_one(text: str, speaker: str, output_path: str) -> str:
     """Gradio 5 SSE flow: POST /call/tts_fn -> event_id -> GET SSE -> download audio."""
+    tts_text = _to_simplified(text)
     # Inputs: [text, character, language, speed, symbol_input]
-    payload = {"data": [text, speaker, VITS_LANGUAGE, 1.0, False]}
+    payload = {"data": [tts_text, speaker, VITS_LANGUAGE, VITS_SPEED, False]}
 
     call_url = f"{VITS_SPACE_URL}{VITS_API_PREFIX}/call/{VITS_API_NAME}"
     r = requests.post(call_url, json=payload, timeout=VITS_TIMEOUT)

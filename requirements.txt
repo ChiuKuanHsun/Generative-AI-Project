@@ -7,4 +7,5 @@ Pillow
 python-dotenv
 numpy
 mutagen
+zhconv
 # openai-whisper  # future: animated karaoke subtitles

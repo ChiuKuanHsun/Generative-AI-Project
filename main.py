@@ -18,6 +18,7 @@ load_dotenv("api-key.env")
 from news_fetcher import fetch_news_and_generate_dialogue, TOPICS
 from tts_generator import generate_audio_files, get_mp3_duration, set_vits_voices, get_vits_speakers
 from chart_generator import generate_chart
+from image_agent import generate_news_images
 from video_composer import compose_video
 
 TEST_ASSETS_DIR  = "experiment-assets"
@@ -151,7 +152,7 @@ def _audio_is_stale(audio_dir: str, dialogue_path: str, n_lines: int) -> bool:
     return False
 
 
-def load_test_assets(force_regen_audio: bool = False) -> tuple[dict, list, str | None]:
+def load_test_assets(force_regen_audio: bool = False) -> tuple[dict, list, str | None, list[str]]:
     """Load cached assets. Regenerates audio via local TTS (free) when stale or forced."""
     dialogue_path = os.path.join(TEST_ASSETS_DIR, "dialogue.json")
     with open(dialogue_path, encoding="utf-8") as f:
@@ -185,7 +186,14 @@ def load_test_assets(force_regen_audio: bool = False) -> tuple[dict, list, str |
     if not os.path.exists(chart_path):
         chart_path = None
 
-    return dialogue_data, audio_data, chart_path
+    # Pick up cached news images: news_image_00.png, news_image_01.png, ...
+    # plus the legacy single news_image.png.
+    image_paths = sorted(str(p) for p in Path(TEST_ASSETS_DIR).glob("news_image_*.png"))
+    legacy = os.path.join(TEST_ASSETS_DIR, "news_image.png")
+    if os.path.exists(legacy) and legacy not in image_paths:
+        image_paths.insert(0, legacy)
+
+    return dialogue_data, audio_data, chart_path, image_paths
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -230,14 +238,16 @@ def main():
         label = "Rebuild mode" if force_regen else "Test mode"
         print(f"\n{label}: loading from {TEST_ASSETS_DIR}/ (no Haiku credits used)")
         try:
-            dialogue_data, audio_data, chart_path = load_test_assets(force_regen_audio=force_regen)
+            dialogue_data, audio_data, chart_path, image_paths = load_test_assets(force_regen_audio=force_regen)
         except FileNotFoundError as e:
             print(f"Error: {e}")
             return
 
         topic = dialogue_data.get("topic", "Test Topic")
         total = sum(r["duration"] for r in audio_data)
-        print(f"  Dialogue: {len(audio_data)} lines | Duration: {total:.1f}s | Chart: {'yes' if chart_path else 'no'}")
+        print(f"  Dialogue: {len(audio_data)} lines | Duration: {total:.1f}s "
+              f"| Chart: {'yes' if chart_path else 'no'} "
+              f"| Images: {len(image_paths)}")
 
         out_dir = make_output_dir()
         print(f"\nOutput folder: {out_dir}/")
@@ -250,6 +260,7 @@ def main():
             audio_data=audio_data,
             topic=topic,
             chart_path=chart_path,
+            image_paths=image_paths,
             output_path=video_path,
         )
 
@@ -275,7 +286,7 @@ def main():
     print(f"\nOutput folder: {out_dir}/")
 
     print("\n" + "-" * 45)
-    print("Step 1/4  Fetch news & generate dialogue")
+    print("Step 1/5  Fetch news & generate dialogue")
     print("-" * 45)
     dialogue_data = fetch_news_and_generate_dialogue(topic)
     dialogue_path = os.path.join(out_dir, "dialogue.json")
@@ -284,13 +295,33 @@ def main():
     print(f"Dialogue saved: {dialogue_path}")
 
     print("\n" + "-" * 45)
-    print("Step 2/4  Generate voices (TTS)")
+    print("Step 2/5  Generate voices (TTS @ 1.3x)")
     print("-" * 45)
     audio_dir  = os.path.join(out_dir, "audio")
     audio_data = generate_audio_files(dialogue_data["dialogue"], output_dir=audio_dir)
 
+    # Image count scales with the number of dialogue lines, so each line gets its
+    # own picture and no image lingers on screen for more than ~one line (~3-5s).
+    image_count = max(1, len(audio_data))
+    total_dur   = sum(item["duration"] for item in audio_data)
+    print(f"  Total dialogue length: {total_dur:.1f}s across {len(audio_data)} lines "
+          f"→ fetching {image_count} images.")
+
     print("\n" + "-" * 45)
-    print("Step 3/4  Generate chart (Plotly)")
+    print(f"Step 3/5  Search news images (multi-API agent, {image_count}x)")
+    print("-" * 45)
+    try:
+        image_paths = generate_news_images(
+            dialogue_data.get("topic", topic),
+            output_dir=out_dir,
+            count=image_count,
+        )
+    except Exception as e:
+        print(f"Image search failed ({e}), continuing without images.")
+        image_paths = []
+
+    print("\n" + "-" * 45)
+    print("Step 4/5  Generate chart (Plotly)")
     print("-" * 45)
     chart_path = os.path.join(out_dir, "chart.png")
     try:
@@ -300,13 +331,14 @@ def main():
         chart_path = None
 
     print("\n" + "-" * 45)
-    print("Step 4/4  Compose video (MoviePy)")
+    print("Step 5/5  Compose video (MoviePy)")
     print("-" * 45)
     video_path = os.path.join(out_dir, "output.mp4")
     compose_video(
         audio_data=audio_data,
         topic=dialogue_data.get("topic", topic),
         chart_path=chart_path,
+        image_paths=image_paths,
         output_path=video_path,
     )
 
@@ -314,6 +346,8 @@ def main():
     print("All done!")
     print(f"  Video:    {video_path}")
     print(f"  Dialogue: {dialogue_path}")
+    if image_paths:
+        print(f"  Images:   {len(image_paths)} ({', '.join(os.path.basename(p) for p in image_paths)})")
     if chart_path:
         print(f"  Chart:    {chart_path}")
     print("=" * 45)
