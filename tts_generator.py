@@ -11,6 +11,7 @@ Setup:
 
 import json
 import os
+import re
 from pathlib import Path
 import requests
 
@@ -36,7 +37,7 @@ VITS_API_NAME  = "tts_fn"     # Gradio api_name for main TTS
 VITS_LANGUAGE  = "简体中文"   # Other options: "日本語", "English"
 VITS_SPEED     = 1.3          # 1.0 = baseline; 1.3 ≈ 30% faster speech + captions
 VITS_TIMEOUT   = 180
-
+ 
 
 def _to_simplified(text: str) -> str:
     """Convert Traditional → Simplified for VITS. No-op if zhconv is missing."""
@@ -47,12 +48,77 @@ def _to_simplified(text: str) -> str:
     except Exception:
         return text
 
+
+# Half-width and full-width parens. Contents inside are caption-only annotations
+# (e.g. 谷歌(Google)) and must NOT be spoken by the TTS.
+_PARENS_RE = re.compile(r"\([^)]*\)|（[^）]*）")
+
+
+def _strip_annotations(text: str) -> str:
+    return _PARENS_RE.sub("", text)
+
+
+# Safety net: catches FULL ENGLISH WORDS (brand names, person names) that slipped
+# past the dialogue prompt's "中文(English)" rule. Acronyms are intentionally
+# absent — short all-caps tokens (AI, GPT, BTC, NVDA, IPO …) pass through to the
+# TTS so VITS pronounces them letter-by-letter, the way Mandarin speakers say them.
+_FALLBACK_SUBS: dict[str, str] = {
+    # Cryptos
+    "Bitcoin":   "比特幣",
+    "Ethereum":  "以太幣",
+    "Solana":    "索拉納",
+    "Ripple":    "瑞波幣",
+    # Tech megacaps
+    "Apple":     "蘋果",
+    "Tesla":     "特斯拉",
+    "Nvidia":    "輝達",
+    "Microsoft": "微軟",
+    "Google":    "谷歌",
+    "Amazon":    "亞馬遜",
+    "Meta":      "臉書",
+    "Facebook":  "臉書",
+    # AI / general
+    "OpenAI":    "開放人工智慧",
+    "ChatGPT":   "聊天機器人",
+    # People
+    "Musk":      "馬斯克",
+    "Elon":      "伊隆",
+    "Altman":    "奧特曼",
+    "Huang":     "黃仁勳",
+    "Jensen":    "詹森",
+    # Indices
+    "Nasdaq":    "那斯達克",
+}
+
+
+def _apply_fallback_subs(text: str) -> str:
+    """Translate bare full-word English to Chinese; let acronyms pass through."""
+    def replace_one(match: re.Match) -> str:
+        token = match.group(0)
+        if token in _FALLBACK_SUBS:
+            return _FALLBACK_SUBS[token]
+        for k, v in _FALLBACK_SUBS.items():
+            if k.lower() == token.lower():
+                return v
+        # No translation found — keep the token. Acronyms get pronounced letter-by-letter
+        # by VITS; longer unknown words may sound rough but at least aren't dropped.
+        return token
+
+    return re.sub(r"[A-Za-z][A-Za-z0-9&]*", replace_one, text)
+
+
+def _prepare_for_tts(text: str) -> str:
+    """Pipeline: strip caption-only annotations → fallback English subs → Trad→Simp."""
+    text = _strip_annotations(text)
+    text = _apply_fallback_subs(text)
+    text = _to_simplified(text)
+    return text
+
 # Populated at runtime by set_vits_voices() — called from main.py on startup
 VITS_VOICES: dict[str, str] = {
     "gugugaga": "",
     "meowchan": "",
 }
-
 
 def set_vits_voices(voices: dict[str, str]):
     """Apply saved speaker assignments. Called from main.py at startup."""
@@ -96,7 +162,7 @@ def get_vits_speakers() -> list[str]:
 
 def _vits_synthesize_one(text: str, speaker: str, output_path: str) -> str:
     """Gradio 5 SSE flow: POST /call/tts_fn -> event_id -> GET SSE -> download audio."""
-    tts_text = _to_simplified(text)
+    tts_text = _prepare_for_tts(text)
     # Inputs: [text, character, language, speed, symbol_input]
     payload = {"data": [tts_text, speaker, VITS_LANGUAGE, VITS_SPEED, False]}
 

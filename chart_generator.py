@@ -10,14 +10,22 @@ from __future__ import annotations
 
 import anthropic
 import json
+import os
 import re
 import time
 import requests
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
+try:
+    import yfinance as yf
+    _HAS_YFINANCE = True
+except ImportError:
+    _HAS_YFINANCE = False
 
 # ── Palette — one place to tweak colors ──────────────────────────────────────
 CHART_COLORS: dict = {
@@ -76,17 +84,47 @@ def _base_layout(title: str, width: int = 1280, height: int = 720) -> dict:
 
 # ── CoinGecko helpers ─────────────────────────────────────────────────────────
 
-def _cg_get(path: str, params: dict | None = None) -> any:
-    """GET from CoinGecko free API with one rate-limit retry."""
+_CG_MIN_INTERVAL = 1.5   # seconds between CoinGecko requests (free tier ~30/min)
+_CG_LAST_HIT     = 0.0
+
+
+def _cg_get(path: str, params: dict | None = None, max_retries: int = 3):
+    """GET from CoinGecko free API with per-host throttle + 429 backoff."""
+    global _CG_LAST_HIT
     url = f"{COINGECKO_BASE}{path}"
     headers = {"accept": "application/json"}
-    r = requests.get(url, params=params, timeout=15, headers=headers)
-    if r.status_code == 429:
-        print("  CoinGecko rate limited — waiting 30s...")
-        time.sleep(30)
+
+    for attempt in range(max_retries + 1):
+        wait = _CG_MIN_INTERVAL - (time.time() - _CG_LAST_HIT)
+        if wait > 0:
+            time.sleep(wait)
+
         r = requests.get(url, params=params, timeout=15, headers=headers)
+        _CG_LAST_HIT = time.time()
+
+        if r.status_code == 429 and attempt < max_retries:
+            # Honor Retry-After if present, else exponential backoff: 5, 15, 45s
+            try:
+                retry_after = int(r.headers.get("Retry-After", "0"))
+            except ValueError:
+                retry_after = 0
+            backoff = retry_after if retry_after > 0 else 5 * (3 ** attempt)
+            backoff = min(backoff, 60)
+            print(f"  CoinGecko 429 — waiting {backoff}s (attempt {attempt + 1}/{max_retries})...")
+            time.sleep(backoff)
+            continue
+
+        r.raise_for_status()
+        return r.json()
+
     r.raise_for_status()
     return r.json()
+
+
+# In-process caches — duplicate dashboard/line/bar lookups within a single
+# generate_chart_set run hit these instead of CoinGecko.
+_SPARKLINE_CACHE: dict[tuple[str, int], tuple[list[float], list[str]]] = {}
+_MARKETS_CACHE:   dict[frozenset, list[dict]] = {}
 
 
 _DEFAULT_COINS = ["bitcoin", "ethereum", "solana", "ripple", "binancecoin",
@@ -124,7 +162,11 @@ def _resolve_coin_ids(topic: str, max_coins: int = 4,
 
 
 def _cg_sparkline(coin_id: str, days: int = 7) -> tuple[list[float], list[str]]:
-    """Return (prices, iso_dates) from hourly market_chart."""
+    """Return (prices, iso_dates) from hourly market_chart. Cached per process."""
+    key = (coin_id, days)
+    if key in _SPARKLINE_CACHE:
+        return _SPARKLINE_CACHE[key]
+
     data = _cg_get(
         f"/coins/{coin_id}/market_chart",
         {"vs_currency": "usd", "days": days, "interval": "hourly"},
@@ -134,6 +176,7 @@ def _cg_sparkline(coin_id: str, days: int = 7) -> tuple[list[float], list[str]]:
         datetime.fromtimestamp(p[0] / 1000, tz=timezone.utc).isoformat()
         for p in data["prices"]
     ]
+    _SPARKLINE_CACHE[key] = (prices, dates)
     return prices, dates
 
 
@@ -167,14 +210,20 @@ def _cg_ohlc_with_volume(coin_id: str, days: int = 14) -> list[dict]:
 
 
 def _cg_markets(coin_ids: list[str]) -> list[dict]:
-    """Current price + 24h change for a list of coin IDs."""
-    return _cg_get("/coins/markets", {
+    """Current price + 24h change for a list of coin IDs. Cached per process."""
+    key = frozenset(coin_ids)
+    if key in _MARKETS_CACHE:
+        return _MARKETS_CACHE[key]
+
+    data = _cg_get("/coins/markets", {
         "vs_currency": "usd",
         "ids":         ",".join(coin_ids),
         "order":       "market_cap_desc",
         "per_page":    len(coin_ids),
         "page":        1,
     })
+    _MARKETS_CACHE[key] = data
+    return data
 
 
 # ── Chart-type inference ──────────────────────────────────────────────────────
@@ -500,6 +549,202 @@ _RENDERERS = {
     "candlestick": render_candlestick,
     "bar":         render_bar,
 }
+
+
+# ── yfinance fetchers (stocks + indices) ─────────────────────────────────────
+
+_DEFAULT_TECH_TICKERS    = ["NVDA", "MSFT", "GOOGL", "META", "AAPL"]
+_DEFAULT_INDEX_TICKERS   = ["^GSPC", "^DJI", "^IXIC", "^N225"]
+
+
+def _detect_assets(topic: str) -> tuple[str, list[str]]:
+    """One Claude call that classifies the topic and returns relevant tickers/coin IDs.
+    Returns ('crypto', [coin_ids]) or ('stock', [tickers]) or ('other', [])."""
+    client = anthropic.Anthropic()
+    resp = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=200,
+        system=(
+            "Classify the topic and return tickers. Respond with ONE JSON object:\n"
+            '  {"type":"crypto","assets":["bitcoin","ethereum",...]} '
+            "(CoinGecko coin ID slugs, lowercase, up to 4) for crypto-dominant topics.\n"
+            '  {"type":"stock","assets":["NVDA","AAPL",...]} '
+            "(Yahoo Finance tickers, uppercase, up to 4) for stock-dominant topics OR "
+            "general financial/tech/AI news where tickers are relevant. For AI/tech news "
+            "default to NVDA, MSFT, GOOGL, META, AAPL. For global financial markets "
+            "default to ^GSPC, ^DJI, ^IXIC, ^N225.\n"
+            '  {"type":"other","assets":[]} only if NO ticker is relevant.\n'
+            "For mixed crypto+stock topics, prefer 'crypto'. Output JSON ONLY, no other text."
+        ),
+        messages=[{"role": "user", "content": topic}],
+    )
+    raw = "".join(b.text for b in resp.content if b.type == "text").strip()
+    m = re.search(r"\{[\s\S]*?\}", raw)
+    if not m:
+        return "other", []
+    try:
+        data = json.loads(m.group(0))
+        return data.get("type", "other"), data.get("assets", []) or []
+    except Exception:
+        return "other", []
+
+
+def _yf_history(ticker: str, period: str, interval: str):
+    if not _HAS_YFINANCE:
+        raise RuntimeError("yfinance not installed — pip install yfinance")
+    df = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
+    if df is None or df.empty:
+        raise RuntimeError(f"no Yahoo Finance data for {ticker}")
+    return df
+
+
+def _yf_line(topic: str, tickers: list[str]) -> dict:
+    """7-day hourly close prices for up to 4 stocks/indices."""
+    tickers = tickers[:4]
+    if not tickers:
+        raise ValueError("No tickers for line chart")
+
+    assets = []
+    for ticker in tickers:
+        try:
+            df = _yf_history(ticker, period="7d", interval="1h")
+        except Exception as e:
+            print(f"  yf line skip {ticker}: {e}")
+            continue
+        prices = [float(p) for p in df["Close"].tolist()]
+        dates  = [d.isoformat() for d in df.index]
+        assets.append({"label": ticker, "prices": prices, "dates": dates})
+
+    if not assets:
+        raise RuntimeError("No yfinance data returned for any ticker")
+
+    normalize = any(k in topic.lower() for k in
+                    ["compare", "vs", "versus", "relative", "normalized"])
+    head   = " & ".join(a["label"] for a in assets[:3])
+    suffix = " (+ more)" if len(assets) > 3 else ""
+    return {"title": f"{head}{suffix} — 7-Day Price",
+            "assets": assets, "normalize": normalize}
+
+
+def _yf_candlestick(topic: str, tickers: list[str]) -> dict:
+    """30-day daily OHLC + volume for the first ticker."""
+    if not tickers:
+        raise ValueError("No ticker for candlestick chart")
+    ticker = tickers[0]
+    df = _yf_history(ticker, period="30d", interval="1d")
+
+    ohlc = []
+    for idx, row in df.iterrows():
+        ohlc.append({
+            "t": idx.isoformat(),
+            "o": float(row["Open"]),
+            "h": float(row["High"]),
+            "l": float(row["Low"]),
+            "c": float(row["Close"]),
+            "v": float(row.get("Volume", 0) or 0),
+        })
+    return {"title": f"{ticker} — 30-Day OHLC", "label": ticker, "ohlc": ohlc}
+
+
+def _yf_bar(topic: str, tickers: list[str]) -> dict:
+    """24h % change leaderboard for up to 8 stocks/indices."""
+    tickers = tickers[:8]
+    if not tickers:
+        raise ValueError("No tickers for bar chart")
+
+    items = []
+    for ticker in tickers:
+        try:
+            df = _yf_history(ticker, period="5d", interval="1d")
+        except Exception as e:
+            print(f"  yf bar skip {ticker}: {e}")
+            continue
+        if len(df) < 2:
+            continue
+        prev = float(df["Close"].iloc[-2])
+        cur  = float(df["Close"].iloc[-1])
+        if prev == 0:
+            continue
+        items.append({
+            "label":      ticker,
+            "value":      cur,
+            "change_pct": (cur - prev) / prev * 100,
+        })
+
+    if not items:
+        raise RuntimeError("No yfinance data returned for any ticker")
+
+    sort_desc = any(k in topic.lower() for k in
+                    ["winners", "top", "best", "gainers"])
+    return {"title": "24h Performance", "items": items, "sort_desc": sort_desc}
+
+
+# ── Multi-chart generator ─────────────────────────────────────────────────────
+
+def generate_chart_set(topic: str, output_dir: str = ".") -> list[str]:
+    """Generate dashboard + line + candlestick + bar charts for the topic.
+    Returns list of saved chart paths in the order they were rendered."""
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    saved: list[str] = []
+
+    asset_class, assets = _detect_assets(topic)
+    print(f"  Asset class: {asset_class}  assets: {assets}")
+
+    # Fallbacks for "other" topics so they still get visual charts
+    if asset_class == "other" and _HAS_YFINANCE:
+        # Heuristic: if topic looks tech/AI use tech tickers, else indices
+        t_low = topic.lower()
+        if any(k in t_low for k in ("ai", "tech", "nvidia", "openai", "chatgpt", "gpu")):
+            assets = _DEFAULT_TECH_TICKERS
+        else:
+            assets = _DEFAULT_INDEX_TICKERS
+        asset_class = "stock"
+        print(f"  Fallback → {asset_class} {assets}")
+
+    client = anthropic.Anthropic()
+
+    # 1) Dashboard — works for any topic via Claude web_search
+    try:
+        path = os.path.join(output_dir, "chart_dashboard.png")
+        data = _fetch_dashboard(topic, client)
+        render_dashboard(data, path)
+        saved.append(path)
+    except Exception as e:
+        print(f"  Dashboard chart failed: {e}")
+
+    # 2/3/4) line, candlestick, bar — data source depends on asset_class
+    if asset_class == "crypto":
+        plan = [
+            ("line",        _fetch_line,        render_line),
+            ("candlestick", _fetch_candlestick, render_candlestick),
+            ("bar",         _fetch_bar,         render_bar),
+        ]
+        for name, fetcher, renderer in plan:
+            try:
+                path = os.path.join(output_dir, f"chart_{name}.png")
+                data = fetcher(topic)
+                renderer(data, path)
+                saved.append(path)
+                time.sleep(0.5)  # gentle on CoinGecko
+            except Exception as e:
+                print(f"  {name} chart failed: {e}")
+    elif asset_class == "stock":
+        plan = [
+            ("line",        lambda t: _yf_line(t, assets),        render_line),
+            ("candlestick", lambda t: _yf_candlestick(t, assets), render_candlestick),
+            ("bar",         lambda t: _yf_bar(t, assets),         render_bar),
+        ]
+        for name, fetcher, renderer in plan:
+            try:
+                path = os.path.join(output_dir, f"chart_{name}.png")
+                data = fetcher(topic)
+                renderer(data, path)
+                saved.append(path)
+            except Exception as e:
+                print(f"  {name} chart failed: {e}")
+
+    print(f"  Generated {len(saved)} charts.")
+    return saved
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

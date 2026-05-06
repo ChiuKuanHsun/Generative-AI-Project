@@ -17,9 +17,10 @@ load_dotenv("api-key.env")
 
 from news_fetcher import fetch_news_and_generate_dialogue, TOPICS
 from tts_generator import generate_audio_files, get_mp3_duration, set_vits_voices, get_vits_speakers
-from chart_generator import generate_chart
+from chart_generator import generate_chart, generate_chart_set
 from image_agent import generate_news_images
 from video_composer import compose_video
+from youtube_uploader import upload_video
 
 TEST_ASSETS_DIR  = "experiment-assets"
 VOICE_CONFIG_PATH = "voice_config.json"
@@ -120,11 +121,53 @@ def configure_voices():
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _prompt_youtube_upload(video_path: str, dialogue_data: dict) -> None:
+    """Ask whether to upload to YouTube as a Short, then run the upload."""
+    if not os.path.exists(video_path):
+        return
+
+    confirm = input("\nUpload to YouTube as a Short? (Y/n) ").strip().lower()
+    if confirm == "n":
+        return
+
+    topic   = dialogue_data.get("topic", "Financial News")
+    summary = dialogue_data.get("summary", "")
+
+    title = f"{topic} #Shorts"
+    description = (
+        f"{summary}\n\n"
+        "Auto-generated financial news short. Data for reference only — invest responsibly.\n\n"
+        "#Shorts #Finance #News #Crypto #Stocks #AI"
+    )
+    tags = ["finance", "news", "crypto", "stocks", "AI", "shorts", "market"]
+
+    privacy_in = input("Privacy [public / unlisted / private] (default: public): ").strip().lower()
+    privacy = privacy_in if privacy_in in ("public", "unlisted", "private") else "public"
+
+    try:
+        url = upload_video(video_path, title, description, tags=tags, privacy=privacy)
+        print(f"\n  YouTube: {url}")
+    except Exception as e:
+        print(f"\nUpload failed: {e}")
+
+
 def make_output_dir() -> str:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = f"output_{ts}"
     Path(out_dir).mkdir(exist_ok=True)
     return out_dir
+
+
+def _interleave_visuals(images: list[str], charts: list[str]) -> list[str]:
+    """Round-robin: image, chart, image, chart, ... so charts appear throughout."""
+    out: list[str] = []
+    i, c = 0, 0
+    while i < len(images) or c < len(charts):
+        if i < len(images):
+            out.append(images[i]); i += 1
+        if c < len(charts):
+            out.append(charts[c]); c += 1
+    return out
 
 
 def _find_cached_audio(audio_dir: str, i: int) -> str | None:
@@ -152,7 +195,7 @@ def _audio_is_stale(audio_dir: str, dialogue_path: str, n_lines: int) -> bool:
     return False
 
 
-def load_test_assets(force_regen_audio: bool = False) -> tuple[dict, list, str | None, list[str]]:
+def load_test_assets(force_regen_audio: bool = False) -> tuple[dict, list, list[str], list[str]]:
     """Load cached assets. Regenerates audio via local TTS (free) when stale or forced."""
     dialogue_path = os.path.join(TEST_ASSETS_DIR, "dialogue.json")
     with open(dialogue_path, encoding="utf-8") as f:
@@ -182,9 +225,11 @@ def load_test_assets(force_regen_audio: bool = False) -> tuple[dict, list, str |
                 "duration":   duration,
             })
 
-    chart_path = os.path.join(TEST_ASSETS_DIR, "chart.png")
-    if not os.path.exists(chart_path):
-        chart_path = None
+    # Charts: prefer the new chart_<type>.png set, fall back to legacy chart.png
+    chart_paths = sorted(str(p) for p in Path(TEST_ASSETS_DIR).glob("chart_*.png"))
+    legacy_chart = os.path.join(TEST_ASSETS_DIR, "chart.png")
+    if not chart_paths and os.path.exists(legacy_chart):
+        chart_paths = [legacy_chart]
 
     # Pick up cached news images: news_image_00.png, news_image_01.png, ...
     # plus the legacy single news_image.png.
@@ -193,7 +238,7 @@ def load_test_assets(force_regen_audio: bool = False) -> tuple[dict, list, str |
     if os.path.exists(legacy) and legacy not in image_paths:
         image_paths.insert(0, legacy)
 
-    return dialogue_data, audio_data, chart_path, image_paths
+    return dialogue_data, audio_data, chart_paths, image_paths
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -238,7 +283,7 @@ def main():
         label = "Rebuild mode" if force_regen else "Test mode"
         print(f"\n{label}: loading from {TEST_ASSETS_DIR}/ (no Haiku credits used)")
         try:
-            dialogue_data, audio_data, chart_path, image_paths = load_test_assets(force_regen_audio=force_regen)
+            dialogue_data, audio_data, chart_paths, image_paths = load_test_assets(force_regen_audio=force_regen)
         except FileNotFoundError as e:
             print(f"Error: {e}")
             return
@@ -246,8 +291,9 @@ def main():
         topic = dialogue_data.get("topic", "Test Topic")
         total = sum(r["duration"] for r in audio_data)
         print(f"  Dialogue: {len(audio_data)} lines | Duration: {total:.1f}s "
-              f"| Chart: {'yes' if chart_path else 'no'} "
-              f"| Images: {len(image_paths)}")
+              f"| Charts: {len(chart_paths)} | Images: {len(image_paths)}")
+
+        visuals = _interleave_visuals(image_paths, chart_paths)
 
         out_dir = make_output_dir()
         print(f"\nOutput folder: {out_dir}/")
@@ -259,8 +305,8 @@ def main():
         compose_video(
             audio_data=audio_data,
             topic=topic,
-            chart_path=chart_path,
-            image_paths=image_paths,
+            chart_path=chart_paths[0] if chart_paths else None,
+            image_paths=visuals,
             output_path=video_path,
         )
 
@@ -268,6 +314,8 @@ def main():
         print("Done!")
         print(f"  Video: {video_path}")
         print("=" * 45)
+
+        _prompt_youtube_upload(video_path, dialogue_data)
         return
 
     # ── Normal mode ───────────────────────────────────────────────────────────
@@ -300,35 +348,41 @@ def main():
     audio_dir  = os.path.join(out_dir, "audio")
     audio_data = generate_audio_files(dialogue_data["dialogue"], output_dir=audio_dir)
 
-    # Image count scales with the number of dialogue lines, so each line gets its
-    # own picture and no image lingers on screen for more than ~one line (~3-5s).
-    image_count = max(1, len(audio_data))
-    total_dur   = sum(item["duration"] for item in audio_data)
-    print(f"  Total dialogue length: {total_dur:.1f}s across {len(audio_data)} lines "
-          f"→ fetching {image_count} images.")
+    total_dur = sum(item["duration"] for item in audio_data)
+    print(f"  Dialogue: {len(audio_data)} lines, {total_dur:.1f}s total")
 
     print("\n" + "-" * 45)
-    print(f"Step 3/5  Search news images (multi-API agent, {image_count}x)")
+    print("Step 3/5  Generate charts (dashboard + line + candlestick + bar)")
     print("-" * 45)
     try:
-        image_paths = generate_news_images(
-            dialogue_data.get("topic", topic),
-            output_dir=out_dir,
-            count=image_count,
-        )
+        chart_paths = generate_chart_set(topic, output_dir=out_dir)
     except Exception as e:
-        print(f"Image search failed ({e}), continuing without images.")
+        print(f"Chart generation failed ({e}), continuing without charts.")
+        chart_paths = []
+
+    # Total visuals = #dialogue lines, split between charts and news photos.
+    image_count = max(0, len(audio_data) - len(chart_paths))
+    print(f"\n  Visual budget: {len(audio_data)} slots = "
+          f"{len(chart_paths)} charts + {image_count} news photos")
+
+    print("\n" + "-" * 45)
+    print(f"Step 4/5  Search news images (multi-API agent, {image_count}x)")
+    print("-" * 45)
+    if image_count > 0:
+        try:
+            image_paths = generate_news_images(
+                dialogue_data.get("topic", topic),
+                output_dir=out_dir,
+                count=image_count,
+            )
+        except Exception as e:
+            print(f"Image search failed ({e}), continuing without images.")
+            image_paths = []
+    else:
+        print("  Skipping — charts already fill all dialogue slots.")
         image_paths = []
 
-    print("\n" + "-" * 45)
-    print("Step 4/5  Generate chart (Plotly)")
-    print("-" * 45)
-    chart_path = os.path.join(out_dir, "chart.png")
-    try:
-        generate_chart(topic, output_path=chart_path)
-    except Exception as e:
-        print(f"Chart generation failed ({e}), skipping chart.")
-        chart_path = None
+    visuals = _interleave_visuals(image_paths, chart_paths)
 
     print("\n" + "-" * 45)
     print("Step 5/5  Compose video (MoviePy)")
@@ -337,8 +391,8 @@ def main():
     compose_video(
         audio_data=audio_data,
         topic=dialogue_data.get("topic", topic),
-        chart_path=chart_path,
-        image_paths=image_paths,
+        chart_path=chart_paths[0] if chart_paths else None,  # fallback only
+        image_paths=visuals,
         output_path=video_path,
     )
 
@@ -346,11 +400,12 @@ def main():
     print("All done!")
     print(f"  Video:    {video_path}")
     print(f"  Dialogue: {dialogue_path}")
-    if image_paths:
-        print(f"  Images:   {len(image_paths)} ({', '.join(os.path.basename(p) for p in image_paths)})")
-    if chart_path:
-        print(f"  Chart:    {chart_path}")
+    if visuals:
+        print(f"  Visuals:  {len(visuals)} "
+              f"({len(chart_paths)} charts + {len(image_paths)} photos)")
     print("=" * 45)
+
+    _prompt_youtube_upload(video_path, dialogue_data)
 
 
 if __name__ == "__main__":

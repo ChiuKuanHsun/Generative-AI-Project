@@ -13,6 +13,7 @@ Only the speaking character is ever rendered — the silent character is hidden.
 
 import os
 import random
+import re
 import numpy as np
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
@@ -243,51 +244,100 @@ def _is_cjk(text: str) -> bool:
     return any('一' <= c <= '鿿' for c in text)
 
 
+# Match (English) or （...）groups — caption-only annotations, never karaoke-driven.
+_ANNOTATION_RE = re.compile(r"\([^)]*\)|（[^）]*）")
+ANNOTATION_COLOR = (170, 200, 240, 230)  # light blue: always visible, never animated
+
+
 def _build_unit_timings(text: str, duration: float):
-    """Distribute audio duration evenly across units (chars for CJK, words otherwise)."""
-    if _is_cjk(text):
-        units = [c for c in text if c.strip()]
-    else:
-        units = text.split()
-    if not units:
+    """Returns list of (unit, start, end, speakable). Annotations like (Google) are
+    one non-speakable display unit each; karaoke timing flows only through speakable
+    units (CJK chars or English words)."""
+    if not text:
         return []
-    per = duration / len(units)
-    return [(u, i * per, (i + 1) * per) for i, u in enumerate(units)]
+
+    cjk_mode = _is_cjk(text)
+    parts = _ANNOTATION_RE.split(text)
+    annotations = _ANNOTATION_RE.findall(text)
+
+    units: list[tuple[str, bool]] = []
+    # Interleave: parts[0], annotations[0], parts[1], annotations[1], ..., parts[-1]
+    for i, part in enumerate(parts):
+        if part:
+            if cjk_mode:
+                # CJK chars per-char; group consecutive ASCII letters/digits as one unit
+                j = 0
+                while j < len(part):
+                    c = part[j]
+                    if c.isspace():
+                        j += 1
+                    elif c.isascii() and (c.isalnum() or c in "$%&-.,"):
+                        k = j
+                        while k < len(part) and part[k].isascii() and (
+                            part[k].isalnum() or part[k] in "$%&-.,"
+                        ):
+                            k += 1
+                        units.append((part[j:k], True))
+                        j = k
+                    else:
+                        units.append((c, True))
+                        j += 1
+            else:
+                for w in part.split():
+                    if w:
+                        units.append((w, True))
+        if i < len(annotations):
+            units.append((annotations[i], False))
+
+    speakable_count = sum(1 for _, s in units if s)
+    if speakable_count == 0:
+        # All annotations or all whitespace — no karaoke, but still render text
+        return [(u, 0.0, 0.0, sp) for u, sp in units]
+
+    per = duration / speakable_count
+    timings = []
+    speak_idx = 0
+    for unit_text, speakable in units:
+        if speakable:
+            timings.append((unit_text, speak_idx * per, (speak_idx + 1) * per, True))
+            speak_idx += 1
+        else:
+            timings.append((unit_text, 0.0, 0.0, False))
+    return timings
 
 
 def _layout_subtitle(timings, font, max_w):
-    """Compute (idx, x, y, unit) positions and total height. Centered per line."""
+    """Compute (idx, x, y, unit, speakable) positions and total height."""
     if not timings:
         return [], 0
 
-    is_cjk = _is_cjk("".join(u for u, _, _ in timings))
+    is_cjk = _is_cjk("".join(u for u, _, _, _ in timings))
     space_w = font.getbbox(" ")[2] - font.getbbox(" ")[0] if not is_cjk else 0
     line_h = font.size + 10
 
-    widths = [font.getbbox(u)[2] - font.getbbox(u)[0] for u, _, _ in timings]
+    widths = [font.getbbox(u)[2] - font.getbbox(u)[0] for u, _, _, _ in timings]
 
-    # Pack units into lines greedily
     lines = []
     cur_line, cur_w = [], 0
-    for i, ((unit, _, _), uw) in enumerate(zip(timings, widths)):
+    for i, ((unit, _, _, speakable), uw) in enumerate(zip(timings, widths)):
         gap = 0 if (is_cjk or not cur_line) else space_w
         if cur_line and cur_w + gap + uw > max_w:
             lines.append(cur_line)
             cur_line, cur_w = [], 0
             gap = 0
-        cur_line.append((i, unit, uw, gap))
+        cur_line.append((i, unit, uw, gap, speakable))
         cur_w += gap + uw
     if cur_line:
         lines.append(cur_line)
 
     positions = []
     for li, line in enumerate(lines):
-        line_w = sum(uw + gap for _, _, uw, gap in line)
+        line_w = sum(uw + gap for _, _, uw, gap, _ in line)
         x = (max_w - line_w) // 2
         y = li * line_h
-        for idx, unit, uw, gap in line:
+        for idx, unit, uw, gap, speakable in line:
             x += gap
-            positions.append((idx, x, y, unit))
+            positions.append((idx, x, y, unit, speakable))
             x += uw
 
     return positions, len(lines) * line_h
@@ -295,7 +345,8 @@ def _layout_subtitle(timings, font, max_w):
 
 def _make_subtitle_text_layer(positions, total_h: int,
                                 current_idx: int, role_color: tuple) -> Image.Image:
-    """Render subtitle text with one unit highlighted. Returns full-frame RGBA."""
+    """Render subtitle text with one speakable unit highlighted. Annotations are
+    drawn in a constant secondary color regardless of current_idx."""
     sx1, sy1, sx2, sy2 = SUBTITLE_BOX
     sh = sy2 - sy1
     layer = Image.new("RGBA", (VIDEO_WIDTH, VIDEO_HEIGHT), (0, 0, 0, 0))
@@ -306,13 +357,15 @@ def _make_subtitle_text_layer(positions, total_h: int,
     font = _find_font(SUBTITLE_FONT_SIZE)
     y_offset = sy1 + (sh - total_h) // 2
 
-    for idx, x, y, unit in positions:
-        if idx == current_idx:
-            fill = (255, 215, 90, 255)        # bright gold = active word
+    for idx, x, y, unit, speakable in positions:
+        if not speakable:
+            fill = ANNOTATION_COLOR              # english-in-parens: always dim blue
+        elif idx == current_idx:
+            fill = (255, 215, 90, 255)            # gold: active
         elif idx < current_idx:
-            fill = (230, 230, 245, 255)       # spoken
+            fill = (230, 230, 245, 255)           # spoken
         else:
-            fill = (140, 140, 165, 230)       # upcoming
+            fill = (140, 140, 165, 230)           # upcoming
         draw.text((sx1 + x, y_offset + y), unit, font=font, fill=fill)
 
     return layer
@@ -344,9 +397,12 @@ def _build_dialogue_clip(bg_subclip, role: str, line: str, topic: str,
     sub_alphas = [layer[:, :, 3:4].astype(np.float32) / 255.0 for layer in sub_layers]
     sub_rgbs = [layer[:, :, :3].astype(np.float32) for layer in sub_layers]
 
-    # Avoid Python loop in the hot path: precompute timing boundaries as arrays
-    starts = np.array([s for _, s, _ in timings] or [0.0])
-    ends = np.array([e for _, _, e in timings] or [0.0])
+    # Time-to-index lookup runs ONLY across speakable units; annotations never
+    # become the "current" highlight. speakable_to_timings maps speakable order
+    # back to the unit index inside `timings`.
+    speakable_to_timings = [i for i, t in enumerate(timings) if t[3]]
+    starts = np.array([timings[i][1] for i in speakable_to_timings] or [0.0])
+    ends   = np.array([timings[i][2] for i in speakable_to_timings] or [0.0])
 
     def process(get_frame, t):
         frame = get_frame(t)
@@ -355,10 +411,10 @@ def _build_dialogue_clip(bg_subclip, role: str, line: str, topic: str,
         out = np.array(bg, dtype=np.float32)
         out = out * (1 - static_alpha) + static_rgb * static_alpha
 
-        # Find current unit index at time t
-        if timings:
+        # Find current speakable unit at time t, then map to the timings index
+        if speakable_to_timings:
             mask = (starts <= t) & (t < ends)
-            idx = int(np.argmax(mask)) if mask.any() else -1
+            idx = speakable_to_timings[int(np.argmax(mask))] if mask.any() else -1
         else:
             idx = -1
         sa = sub_alphas[idx + 1]
@@ -400,72 +456,14 @@ def _build_solid_clip(role: str, line: str, topic: str,
     ends = np.array([e for _, _, e in timings] or [0.0])
 
     def make_frame(t):
-        if timings:
+        if speakable_to_timings:
             mask = (starts <= t) & (t < ends)
-            idx = int(np.argmax(mask)) if mask.any() else -1
+            idx = speakable_to_timings[int(np.argmax(mask))] if mask.any() else -1
         else:
             idx = -1
         out = bg_with_ui * (1 - sub_alphas[idx + 1]) + sub_rgbs[idx + 1] * sub_alphas[idx + 1]
         return out.clip(0, 255).astype(np.uint8)
 
-    return VideoClip(make_frame, duration=duration)
-
-
-# ── End card ─────────────────────────────────────────────────────────────────
-
-def _make_end_card_overlay(topic: str, chart_img: Image.Image) -> Image.Image:
-    img = Image.new("RGBA", (VIDEO_WIDTH, VIDEO_HEIGHT), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    draw.rectangle([(0, 0), (VIDEO_WIDTH, 80)], fill=(10, 10, 25, 220))
-    draw.text((VIDEO_WIDTH // 2, 40), topic, font=_find_font(24),
-              fill=(200, 200, 230, 255), anchor="mm")
-
-    chart_top = 120
-    chart_bottom = VIDEO_HEIGHT - 120
-    draw.rectangle([(15, chart_top - 10), (VIDEO_WIDTH - 15, chart_bottom + 10)],
-                    fill=(5, 5, 15, 200))
-
-    chart_w = VIDEO_WIDTH - 40
-    chart_h = chart_bottom - chart_top
-    chart_resized = chart_img.copy().convert("RGBA")
-    chart_resized.thumbnail((chart_w, chart_h), Image.LANCZOS)
-    cx = (VIDEO_WIDTH - chart_resized.width) // 2
-    cy = chart_top + (chart_h - chart_resized.height) // 2
-    img.paste(chart_resized, (cx, cy), chart_resized)
-
-    draw.rectangle([(0, VIDEO_HEIGHT - 80), (VIDEO_WIDTH, VIDEO_HEIGHT)],
-                    fill=(10, 10, 25, 200))
-    draw.text((VIDEO_WIDTH // 2, VIDEO_HEIGHT - 40),
-              "Data for reference only. Invest responsibly.",
-              font=_find_font(18), fill=(150, 150, 170, 220), anchor="mm")
-    return img
-
-
-def _apply_end_card_overlay(bg_subclip, topic: str, chart_img: Image.Image):
-    ui_arr = np.array(_make_end_card_overlay(topic, chart_img))
-    alpha = ui_arr[:, :, 3:4].astype(np.float32) / 255.0
-    rgb = ui_arr[:, :, :3].astype(np.float32)
-
-    def process(frame):
-        bg = Image.fromarray(frame).convert("RGB")
-        bg = ImageEnhance.Brightness(bg).enhance(BG_DIM * 0.7)
-        bg_arr = np.array(bg, dtype=np.float32)
-        out = bg_arr * (1 - alpha) + rgb * alpha
-        return out.clip(0, 255).astype(np.uint8)
-
-    return bg_subclip.image_transform(process)
-
-
-def _build_solid_end_card(topic: str, chart_img: Image.Image, duration: float):
-    bg_solid = np.full((VIDEO_HEIGHT, VIDEO_WIDTH, 3), (8, 8, 15), dtype=np.float32)
-    ui_arr = np.array(_make_end_card_overlay(topic, chart_img))
-    alpha = ui_arr[:, :, 3:4].astype(np.float32) / 255.0
-    rgb = ui_arr[:, :, :3].astype(np.float32)
-    composed = (bg_solid * (1 - alpha) + rgb * alpha).clip(0, 255).astype(np.uint8)
-
-    def make_frame(_t):
-        return composed
     return VideoClip(make_frame, duration=duration)
 
 
@@ -477,15 +475,16 @@ def compose_video(
     chart_path: str | None = None,
     image_paths: list[str] | str | None = None,
     output_path: str = "output.mp4",
-    end_card_duration: float = 4.0,
 ) -> str:
-    """Stitch dialogue clips + end card into the final mp4.
+    """Stitch dialogue clips into the final mp4.
 
     image_paths: list of news images for the dialogue content area; rotated across
                  dialogue lines so the same picture isn't on screen the whole video.
                  Falls back to the chart if empty/None. Accepts a single string for
                  backwards compatibility.
-    chart_path:  data chart, used on the end card and as the dialogue fallback.
+    chart_path:  data chart used as the dialogue fallback when no images are
+                 available. (Chart is saved separately on disk; not embedded as an
+                 end card.)
     """
     print(f"\nComposing video ({len(audio_data)} dialogue segments)...")
 
@@ -533,15 +532,6 @@ def compose_video(
 
         audio_clip = AudioFileClip(item["audio_path"])
         clips.append(video_clip.with_audio(audio_clip))
-
-    if chart_img is not None:
-        print("  Adding end chart card...")
-        if bg_video is not None:
-            bg_sub = _random_subclip(bg_video, end_card_duration)
-            end_clip = _apply_end_card_overlay(bg_sub, topic, chart_img)
-        else:
-            end_clip = _build_solid_end_card(topic, chart_img, end_card_duration)
-        clips.append(end_clip)
 
     if bg_video is not None:
         bg_video.close()

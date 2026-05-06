@@ -20,10 +20,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import urlparse
 
 import anthropic
+import numpy as np
 import requests
 from PIL import Image
 
@@ -33,28 +36,85 @@ GUARDIAN_API  = "https://content.guardianapis.com/search"
 NYT_API       = "https://api.nytimes.com/svc/search/v2/articlesearch.json"
 
 HTTP_TIMEOUT = 15
-USER_AGENT   = "FinancialVideoBot/1.0 (educational project)"
+# Wikimedia's UA policy asks for an identifiable bot name + use case.
+# https://meta.wikimedia.org/wiki/User-Agent_policy
+USER_AGENT = (
+    "FinancialVideoBot/1.0 "
+    "(auto-generated short-form video pipeline; educational use; "
+    "https://github.com/anthropics/claude-code)"
+)
+
+# Minimum seconds between requests to the same host. Wikimedia's file CDN
+# (upload.wikimedia.org) is the strict one — its API endpoints are more lenient.
+_HOST_MIN_INTERVAL = {
+    "upload.wikimedia.org":  1.0,
+    "commons.wikimedia.org": 0.3,
+}
+_last_hit: dict[str, float] = {}
 
 MIN_PIXELS               = 300   # reject tiny thumbnails
 MAX_CANDIDATES_PER_QUERY = 6
 MAX_TERMS                = 3
 
+# Pixel-stat quality thresholds (tuned to catch pure-black, pure-white,
+# and one-color/low-detail diagrams without over-rejecting real photos).
+QUALITY_MIN_MEAN_LUM = 15    # reject mostly-black images
+QUALITY_MAX_MEAN_LUM = 240   # reject mostly-white / blown-out images
+QUALITY_MIN_STDDEV   = 14    # reject solid-color or near-uniform images
+
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 
-def _http_get(url: str, params: dict | None = None) -> requests.Response | None:
-    try:
-        r = requests.get(
-            url,
-            params=params,
-            timeout=HTTP_TIMEOUT,
-            headers={"User-Agent": USER_AGENT},
-        )
-        r.raise_for_status()
+def _http_get(url: str, params: dict | None = None,
+              max_retries: int = 2) -> requests.Response | None:
+    """GET with per-host throttle + 429/5xx retry honoring Retry-After."""
+    host = urlparse(url).netloc
+    interval = _HOST_MIN_INTERVAL.get(host, 0.0)
+
+    for attempt in range(max_retries + 1):
+        if interval > 0:
+            wait = interval - (time.time() - _last_hit.get(host, 0.0))
+            if wait > 0:
+                time.sleep(wait)
+
+        try:
+            r = requests.get(
+                url, params=params, timeout=HTTP_TIMEOUT,
+                headers={"User-Agent": USER_AGENT},
+            )
+        except Exception as e:
+            if attempt < max_retries:
+                time.sleep(1.0 * (attempt + 1))
+                continue
+            print(f"  HTTP error ({host}): {e}")
+            return None
+
+        _last_hit[host] = time.time()
+
+        if r.status_code == 429 and attempt < max_retries:
+            try:
+                retry_after = int(r.headers.get("Retry-After", "5"))
+            except ValueError:
+                retry_after = 5
+            wait = min(max(retry_after, 1), 30)
+            print(f"  {host} rate-limited (429); waiting {wait}s...")
+            time.sleep(wait)
+            continue
+
+        if r.status_code in (500, 502, 503, 504) and attempt < max_retries:
+            wait = 2.0 * (attempt + 1)
+            print(f"  HTTP {r.status_code} from {host}; retrying in {wait:.0f}s...")
+            time.sleep(wait)
+            continue
+
+        try:
+            r.raise_for_status()
+        except requests.HTTPError as e:
+            print(f"  HTTP error ({host}): {e}")
+            return None
         return r
-    except Exception as e:
-        print(f"  HTTP error ({url.split('/')[2]}): {e}")
-        return None
+
+    return None
 
 
 def _strip_html(text: str) -> str:
@@ -293,6 +353,23 @@ def _pick_top(topic: str, candidates: list[dict], n: int) -> list[dict]:
     return candidates[:n]
 
 
+# ── Quality filter ────────────────────────────────────────────────────────────
+
+def _image_quality_ok(img: Image.Image) -> tuple[bool, str]:
+    """Reject pure-black / pure-white / near-uniform images via luminance stats."""
+    gray = np.asarray(img.convert("L"), dtype=np.float32)
+    mean = float(gray.mean())
+    std  = float(gray.std())
+
+    if mean < QUALITY_MIN_MEAN_LUM:
+        return False, f"too dark (mean lum {mean:.1f})"
+    if mean > QUALITY_MAX_MEAN_LUM:
+        return False, f"too bright (mean lum {mean:.1f})"
+    if std < QUALITY_MIN_STDDEV:
+        return False, f"too uniform (stddev {std:.1f})"
+    return True, ""
+
+
 # ── Download ──────────────────────────────────────────────────────────────────
 
 def _download(url: str, output_path: str) -> str | None:
@@ -302,7 +379,11 @@ def _download(url: str, output_path: str) -> str | None:
             return None
         img = Image.open(BytesIO(r.content)).convert("RGB")
         if img.width < MIN_PIXELS or img.height < MIN_PIXELS:
-            print(f"  Image too small ({img.width}x{img.height}); rejecting.")
+            print(f"  Rejected ({img.width}x{img.height} too small)")
+            return None
+        ok, reason = _image_quality_ok(img)
+        if not ok:
+            print(f"  Rejected ({reason})")
             return None
         img.save(output_path, "PNG")
         print(f"  Saved: {output_path} ({img.width}x{img.height})")
@@ -360,16 +441,21 @@ def generate_news_images(topic: str, output_dir: str = ".",
     sources = sorted({c["source"] for c in candidates})
     print(f"  {len(candidates)} candidates from: {', '.join(sources)}")
 
-    # Ask the agent to rank up to 2x what we want, so we can fall through on download fails
-    over_count = min(len(candidates), max(count * 2, count + 2))
+    # Ask the agent to rank a generous over-count, then fall back to unranked
+    # candidates if the agent's picks get filtered out by the quality check.
+    over_count = min(len(candidates), max(count * 3, count + 4))
     ranked = _pick_top(topic, candidates, over_count)
+
+    ranked_urls = {c["url"] for c in ranked}
+    remainder = [c for c in candidates if c["url"] not in ranked_urls]
+    to_try    = ranked + remainder
 
     saved: list[str] = []
     used_urls: set[str] = set()
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    for chosen in ranked:
+    for chosen in to_try:
         if len(saved) >= count:
             break
         if chosen["url"] in used_urls:

@@ -5,6 +5,10 @@
 api-key.env
 *.env
 
+# YouTube OAuth credentials
+client_secret.json
+youtube_token.json
+
 # Output folders
 output_*/
 audio_test/
