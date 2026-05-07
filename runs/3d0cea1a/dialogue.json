@@ -1,0 +1,46 @@
+{
+  "topic": "比特幣(Bitcoin)與以太幣(Ethereum)創數月高位",
+  "summary": "比特幣創一月底以來新高達八萬二千美元，以太幣則創四月廿七日以來最高價。",
+  "dialogue": [
+    {
+      "role": "gugugaga",
+      "line": "BTC開盤漲百分之一點三，ETH漲零點六？醒醒啦。",
+      "emotion": "sarcastic"
+    },
+    {
+      "role": "meowchan",
+      "line": "那很不錯啊？為什麼你一副不開心的樣子？",
+      "emotion": "confused"
+    },
+    {
+      "role": "gugugaga",
+      "line": "BTC衝到八萬二三百、ETH到二千四，但市值只有一點四兆。數據說話。",
+      "emotion": "serious"
+    },
+    {
+      "role": "meowchan",
+      "line": "中東局勢緩和、聯準會可能降息，不是好消息？",
+      "emotion": "learning"
+    },
+    {
+      "role": "gugugaga",
+      "line": "美元強勢、流動性緊，但機構參與和採納驅動還在。醒目。",
+      "emotion": "excited"
+    },
+    {
+      "role": "meowchan",
+      "line": "所以，能衝到八萬九、甚至九萬四？我該現在買嗎？",
+      "emotion": "surprised"
+    },
+    {
+      "role": "gugugaga",
+      "line": "突破上升通道就回到八萬支撐。自己算。",
+      "emotion": "calm"
+    },
+    {
+      "role": "meowchan",
+      "line": "我懂了…原來投資要靠數據，不是靠希望。",
+      "emotion": "learning"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "topic": "輝達(Nvidia)創新高、蘋果(Apple)前景看好、特斯拉(Tesla)遭質疑",
+  "summary": "輝達與康寧合作光纖製造推升股價，蘋果營收指引超預期，但特斯拉與微軟因資本支出过高陷入困境。",
+  "dialogue": [
+    {
+      "role": "gugugaga",
+      "line": "輝達(Nvidia)漲5.4%，光纖合作消息推動，AI基建供應鏈這波才是真贏家。",
+      "emotion": "sarcastic"
+    },
+    {
+      "role": "meowchan",
+      "line": "那蘋果(Apple)呢？3.3%漲幅？是因為營收好嗎？",
+      "emotion": "curious"
+    },
+    {
+      "role": "gugugaga",
+      "line": "對，蘋果營收指引高達17%成長，遠超華爾街預期，這才叫真實績效。",
+      "emotion": "serious"
+    },
+    {
+      "role": "meowchan",
+      "line": "那特斯拉(Tesla)呢？為什麼沒人買？",
+      "emotion": "confused"
+    },
+    {
+      "role": "gugugaga",
+      "line": "特斯拉高燒高支出，但機器人車進展慢，分析師才給$350目標，市場已失耐心。",
+      "emotion": "sarcastic"
+    },
+    {
+      "role": "meowchan",
+      "line": "微軟(Microsoft)呢？也有支出問題？",
+      "emotion": "learning"
+    },
+    {
+      "role": "gugugaga",
+      "line": "對，微軟2026資本支出$190B，但產品競爭力不足，股價跌14%，數據最會說話。",
+      "emotion": "serious"
+    },
+    {
+      "role": "meowchan",
+      "line": "所以只有會花錢的贏家才能活著，對不對？",
+      "emotion": "surprised"
+    }
+  ]
+}

@@ -212,14 +212,21 @@ def _make_static_overlay(role: str, topic: str,
     cx1, cy1, cx2, cy2 = CONTENT_BOX
     cw, ch = cx2 - cx1, cy2 - cy1
     if chart_img is not None:
+        # Cover mode: fill content box, center-crop — no black letterbox bars
+        src = chart_img.copy().convert("RGBA")
+        scale = max(cw / src.width, ch / src.height)
+        new_w, new_h = int(src.width * scale), int(src.height * scale)
+        scaled = src.resize((new_w, new_h), Image.LANCZOS)
+        left = (new_w - cw) // 2
+        top  = (new_h - ch) // 2
+        cropped = scaled.crop((left, top, left + cw, top + ch))
+        # Rounded-corner clip via alpha mask
+        mask = Image.new("L", (cw, ch), 0)
+        ImageDraw.Draw(mask).rounded_rectangle([(0, 0), (cw - 1, ch - 1)], radius=14, fill=255)
+        cropped.putalpha(mask)
+        img.paste(cropped, (cx1, cy1), cropped)
         draw.rounded_rectangle([(cx1, cy1), (cx2, cy2)], radius=14,
-                                fill=(5, 5, 15, 200),
-                                outline=(60, 60, 80, 220), width=2)
-        chart_resized = chart_img.copy().convert("RGBA")
-        chart_resized.thumbnail((cw - 24, ch - 24), Image.LANCZOS)
-        ix = cx1 + (cw - chart_resized.width) // 2
-        iy = cy1 + (ch - chart_resized.height) // 2
-        img.paste(chart_resized, (ix, iy), chart_resized)
+                                outline=(80, 80, 120, 160), width=2)
     else:
         draw.rounded_rectangle([(cx1, cy1), (cx2, cy2)], radius=14,
                                 fill=(5, 5, 15, 180),

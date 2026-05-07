@@ -1,0 +1,46 @@
+{
+  "topic": "比特幣(Bitcoin)突破八萬二千美元，以太幣(Ethereum)創五週新高",
+  "summary": "比特幣於週三早盤衝至八萬二千三百零五美元，創自一月三十一日以來的新高；以太幣上升至二千四百一十二美元。",
+  "dialogue": [
+    {
+      "role": "gugugaga",
+      "line": "BTC破八萬二，五天漲百分之五，機構資金灌進來了。",
+      "emotion": "calm"
+    },
+    {
+      "role": "meowchan",
+      "line": "哇！那是什麼意思？機構買了會怎樣？",
+      "emotion": "confused"
+    },
+    {
+      "role": "gugugaga",
+      "line": "大錢進場，表示有大戶看好後市。昨天spot ETF淨流入五億三千萬。",
+      "emotion": "sarcastic"
+    },
+    {
+      "role": "meowchan",
+      "line": "那以太幣呢？好像也在漲？",
+      "emotion": "curious"
+    },
+    {
+      "role": "gugugaga",
+      "line": "ETH漲百分之四點六六，但漲幅遠小於BTC。資金往大餅流。",
+      "emotion": "serious"
+    },
+    {
+      "role": "meowchan",
+      "line": "所以我現在該進場買嗎？",
+      "emotion": "learning"
+    },
+    {
+      "role": "gugugaga",
+      "line": "技術面指向八萬五千，但風險也在。伊朗停火傳言才拉起來的。",
+      "emotion": "sarcastic"
+    },
+    {
+      "role": "meowchan",
+      "line": "明白了，看基本面，別只跟風！",
+      "emotion": "learning"
+    }
+  ]
+}
