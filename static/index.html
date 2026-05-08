@@ -510,7 +510,7 @@ video#videoPlayer {
 .char-speaker-scroll { overflow-y: auto; max-height: 320px; }
 .char-speaker-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
-  grid-auto-rows: 140px; gap: 8px; padding: 4px; align-content: start;
+  grid-auto-rows: 175px; gap: 8px; padding: 4px; align-content: start;
 }
 .lib-speaker-name {
   font-size: 9px; color: var(--text-dim); text-align: center;
@@ -1153,20 +1153,31 @@ function closeCharsModal() { charsModal.classList.remove('open'); }
 
 async function charBuildSpeakerGrid() {
   const grid = $('charSpeakerGrid');
+  const empty = $('charSpeakerEmpty');
   if (grid.children.length > 0) return;
+
   let speakers = S.allSpeakers || [];
   if (!speakers.length) {
+    // Show a loading placeholder while fetching from HuggingFace Space
+    empty.classList.remove('hidden');
+    empty.innerHTML = '<div class="spinner" style="margin:0 auto 8px"></div>正在從 HuggingFace 載入角色清單…';
     try {
-      const data = await api('/api/voices/speakers');
+      const data = await api('/api/voices');
       speakers = data.speakers || [];
       S.allSpeakers = speakers;
-    } catch (e) { /* ignore */ }
+      if (data.current) {
+        S.voiceSelections.gugugaga = S.voiceSelections.gugugaga || data.current.gugugaga || null;
+        S.voiceSelections.meowchan = S.voiceSelections.meowchan || data.current.meowchan || null;
+      }
+    } catch (e) {
+      empty.innerHTML = `<span style="color:var(--error)">載入失敗：${e.message}</span>`;
+      return;
+    }
   }
-  if (!speakers.length) {
-    $('charSpeakerEmpty').classList.remove('hidden');
-    return;
-  }
-  $('charSpeakerEmpty').classList.add('hidden');
+
+  empty.innerHTML = '沒有符合的角色';
+  if (!speakers.length) { empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
   _charSpCards.clear();
 
   const observer = new IntersectionObserver(entries => {
