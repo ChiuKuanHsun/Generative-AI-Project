@@ -36,6 +36,7 @@ print(f"Python: {sys.executable}")
 
 VOICE_CONFIG_PATH     = os.getenv("VOICE_CONFIG_PATH", "voice_config.json")
 CHARACTER_CONFIG_PATH = os.getenv("CHARACTER_CONFIG_PATH", "character_config.json")
+RATINGS_PATH          = os.getenv("RATINGS_PATH", "ratings.jsonl")
 CHARACTER_LIBRARY_DIR = "characters"
 SPEAKER_ICON_DIR      = "speaker_icons"
 SPEAKER_ICON_MANIFEST = os.path.join(SPEAKER_ICON_DIR, "manifest.json")
@@ -290,6 +291,11 @@ class CharSelectRequest(BaseModel):
 
 class SpeakerToCharRequest(BaseModel):
     speaker: str
+
+
+class RatingRequest(BaseModel):
+    score: int        # 1–5
+    feedback: str = ""
 
 
 # ── Pipeline helpers ──────────────────────────────────────────────────────────
@@ -859,6 +865,51 @@ async def save_voices(config: VoiceConfig):
     from tts_generator import set_vits_voices
     set_vits_voices(cfg)
     return {"ok": True, "config": cfg}
+
+
+# ── Evaluation / rating endpoints ────────────────────────────────────────────
+
+@app.post("/api/run/{run_id}/rate")
+async def rate_run(run_id: str, req: RatingRequest):
+    if run_id not in _runs:
+        raise HTTPException(404, "Run not found")
+    if not 1 <= req.score <= 5:
+        raise HTTPException(400, "Score must be 1–5")
+    entry = {
+        "run_id":   run_id,
+        "topic":    _runs[run_id].get("topic", ""),
+        "score":    req.score,
+        "feedback": req.feedback.strip(),
+        "ts":       datetime.now().isoformat(),
+    }
+    with open(RATINGS_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    _runs[run_id]["rating"] = req.score
+    return {"ok": True}
+
+
+@app.get("/api/stats")
+async def get_stats():
+    entries: list[dict] = []
+    if os.path.exists(RATINGS_PATH):
+        with open(RATINGS_PATH, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        entries.append(json.loads(line))
+                    except Exception:
+                        pass
+    if not entries:
+        return {"count": 0, "avg_score": None, "distribution": {}}
+    scores = [e["score"] for e in entries]
+    dist = {str(i): scores.count(i) for i in range(1, 6)}
+    return {
+        "count":        len(entries),
+        "avg_score":    round(sum(scores) / len(scores), 2),
+        "distribution": dist,
+        "recent":       entries[-5:],
+    }
 
 
 # ── Dev entry point ───────────────────────────────────────────────────────────

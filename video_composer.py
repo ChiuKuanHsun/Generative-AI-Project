@@ -23,6 +23,8 @@ from moviepy import (
     VideoFileClip,
     concatenate_videoclips,
 )
+from moviepy.video.fx import FadeOut, FadeIn
+from moviepy.audio.fx import AudioFadeOut
 
 # ── Video settings ────────────────────────────────────────────────────────────
 VIDEO_WIDTH = 720
@@ -241,6 +243,20 @@ def _make_static_overlay(role: str, topic: str,
     draw.rounded_rectangle([(sx1, sy1), (sx2, sy2)], radius=20,
                             fill=(10, 10, 25, 215),
                             outline=rc + (220,), width=2)
+
+    # Responsible AI disclaimer watermark (bottom-left, outside both character boxes)
+    wm_text = "AI 生成內容 · 僅供參考"
+    wm_font = _find_font(16)
+    bbox = draw.textbbox((0, 0), wm_text, font=wm_font)
+    wm_w = bbox[2] - bbox[0]
+    wm_h = bbox[3] - bbox[1]
+    wm_x, wm_y = 14, VIDEO_HEIGHT - wm_h - 14
+    pad = 5
+    draw.rounded_rectangle(
+        [(wm_x - pad, wm_y - pad), (wm_x + wm_w + pad, wm_y + wm_h + pad)],
+        radius=6, fill=(0, 0, 0, 140),
+    )
+    draw.text((wm_x, wm_y), wm_text, font=wm_font, fill=(210, 210, 210, 210))
 
     return img
 
@@ -543,7 +559,27 @@ def compose_video(
     if bg_video is not None:
         bg_video.close()
 
-    final = concatenate_videoclips(clips, method="compose")
+    dialogue_final = concatenate_videoclips(clips, method="compose")
+
+    # Fade out the last second of dialogue (video + audio)
+    FADE_DUR = 1.0
+    dialogue_final = dialogue_final.with_effects([FadeOut(FADE_DUR)])
+    if dialogue_final.audio is not None:
+        dialogue_final = dialogue_final.with_audio(
+            dialogue_final.audio.with_effects([AudioFadeOut(FADE_DUR)])
+        )
+
+    # Append outro.mov if present
+    outro_clip = None
+    outro_path = os.path.join("backgrounds", "outro.mov")
+    if os.path.exists(outro_path):
+        print("  Loading outro clip...")
+        outro_raw = VideoFileClip(outro_path)
+        outro_clip = outro_raw.resized((VIDEO_WIDTH, VIDEO_HEIGHT)).with_effects([FadeIn(0.5)])
+        final = concatenate_videoclips([dialogue_final, outro_clip], method="compose")
+    else:
+        print("  (backgrounds/outro.mov not found — skipping outro)")
+        final = dialogue_final
 
     print(f"\nRendering video ({final.duration:.1f}s)... this may take a few minutes")
     try:
@@ -556,6 +592,12 @@ def compose_video(
         )
     finally:
         final.close()
+        dialogue_final.close()
+        if outro_clip is not None:
+            try:
+                outro_clip.close()
+            except Exception:
+                pass
         for clip in clips:
             try:
                 clip.close()

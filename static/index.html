@@ -528,6 +528,32 @@ video#videoPlayer {
 }
 .char-sp-portrait > * { position: absolute; inset: 0; width: 100%; height: 100%; }
 
+/* ── Evaluation card ── */
+.star-row { display: flex; gap: 4px; margin-bottom: 14px; align-items: center; }
+.star-btn {
+  font-size: 36px; background: none; border: none; cursor: pointer;
+  line-height: 1; padding: 2px 4px;
+  color: #2e3650;
+  transition: transform .15s, color .12s;
+  text-shadow: 0 0 1px rgba(255,255,255,.08);
+}
+.star-btn.lit { color: #f59e0b; text-shadow: 0 0 8px rgba(245,158,11,.5); }
+.star-btn:hover { transform: scale(1.25); }
+.eval-feedback {
+  width: 100%; padding: 9px 12px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface-2);
+  color: var(--text); font-size: 13px; font-family: inherit;
+  resize: vertical; min-height: 60px; outline: none; margin-bottom: 12px;
+  transition: border-color .18s;
+}
+.eval-feedback:focus { border-color: var(--accent); }
+.eval-feedback::placeholder { color: var(--text-dim); }
+.stats-bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; font-size: 12px; }
+.stats-bar-bg { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.stats-bar-fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width .4s; }
+.stats-label { color: var(--text-dim); width: 14px; text-align: right; }
+.stats-count { color: var(--text-dim); width: 20px; }
+
 /* ── Hidden util ── */
 .hidden { display: none !important; }
 </style>
@@ -606,6 +632,31 @@ video#videoPlayer {
       <div class="dialogue-side">
         <div id="dialogueContainer"></div>
       </div>
+    </div>
+  </div>
+
+  <!-- Evaluation Card -->
+  <div class="card hidden" id="evalCard">
+    <div class="card-title"><div class="card-title-dot"></div>系統評估 · System Evaluation</div>
+    <div id="evalForm">
+      <div style="font-size:13px;color:var(--text-mid);margin-bottom:12px">這段影片的品質如何？評分幫助我們改善系統。</div>
+      <div class="star-row" id="starRow">
+        <button class="star-btn" data-v="1">★</button>
+        <button class="star-btn" data-v="2">★</button>
+        <button class="star-btn" data-v="3">★</button>
+        <button class="star-btn" data-v="4">★</button>
+        <button class="star-btn" data-v="5">★</button>
+        <span id="starLabel" style="font-size:13px;color:var(--text-dim);margin-left:8px;align-self:center"></span>
+      </div>
+      <textarea class="eval-feedback" id="evalFeedback" placeholder="選填：對這次生成有什麼建議？（語音品質、圖片相關性、字幕…）" rows="3"></textarea>
+      <div style="display:flex;align-items:center;gap:12px">
+        <button class="btn btn-accent" id="evalSubmitBtn" disabled>送出評分</button>
+        <span style="font-size:12px;color:var(--text-dim)" id="evalHint">請先點選星星</span>
+      </div>
+    </div>
+    <div class="hidden" id="evalDone" style="padding:8px 0">
+      <div style="color:var(--success);font-size:14px;font-weight:600;margin-bottom:14px">✓ 感謝你的評分！</div>
+      <div id="statsBox"></div>
     </div>
   </div>
 
@@ -1048,6 +1099,7 @@ function showVideo(url) {
   downloadBtn.classList.remove('hidden');
   ytPrivacy.classList.remove('hidden');
   ytUploadBtn.classList.remove('hidden');
+  showEvalCard();
 }
 
 // ── YouTube upload ─────────────────────────────────────────────────────────
@@ -1609,6 +1661,86 @@ function showToast(msg) {
   toast.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove('show'), 3200);
+}
+
+// ── Evaluation card ────────────────────────────────────────────────────────
+
+const STAR_LABELS = ['', '很差', '普通', '尚可', '不錯', '非常好'];
+let _evalScore = 0;
+
+function showEvalCard() {
+  const card = $('evalCard');
+  card.classList.remove('hidden');
+  $('evalForm').classList.remove('hidden');
+  $('evalDone').classList.add('hidden');
+  _evalScore = 0;
+  $('evalFeedback').value = '';
+  $('evalSubmitBtn').disabled = true;
+  $('evalHint').textContent = '請先點選星星';
+  updateStars(0);
+}
+
+function updateStars(score) {
+  document.querySelectorAll('.star-btn').forEach(btn => {
+    btn.classList.toggle('lit', Number(btn.dataset.v) <= score);
+  });
+  $('starLabel').textContent = score ? STAR_LABELS[score] : '';
+}
+
+document.querySelectorAll('.star-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    _evalScore = Number(btn.dataset.v);
+    updateStars(_evalScore);
+    $('evalSubmitBtn').disabled = false;
+    $('evalHint').textContent = `${_evalScore} 顆星`;
+  });
+  btn.addEventListener('mouseenter', () => updateStars(Number(btn.dataset.v)));
+  btn.addEventListener('mouseleave', () => updateStars(_evalScore));
+});
+
+$('evalSubmitBtn').onclick = async () => {
+  if (!S.runId || !_evalScore) return;
+  const btn = $('evalSubmitBtn');
+  btn.disabled = true;
+  btn.textContent = '送出中…';
+  try {
+    await api(`/api/run/${S.runId}/rate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ score: _evalScore, feedback: $('evalFeedback').value }),
+    });
+    $('evalForm').classList.add('hidden');
+    $('evalDone').classList.remove('hidden');
+    loadStats();
+  } catch (e) {
+    showToast('評分失敗: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = '送出評分';
+  }
+};
+
+async function loadStats() {
+  try {
+    const s = await api('/api/stats');
+    if (!s.count) return;
+    const avg = s.avg_score?.toFixed(1) ?? '-';
+    const dist = s.distribution || {};
+    const maxCount = Math.max(...Object.values(dist).map(Number), 1);
+    const bars = [5,4,3,2,1].map(star => {
+      const cnt = dist[String(star)] || 0;
+      const pct = Math.round(cnt / maxCount * 100);
+      return `<div class="stats-bar-row">
+        <span class="stats-label">${star}★</span>
+        <div class="stats-bar-bg"><div class="stats-bar-fill" style="width:${pct}%"></div></div>
+        <span class="stats-count">${cnt}</span>
+      </div>`;
+    }).join('');
+    $('statsBox').innerHTML = `
+      <div style="font-size:13px;color:var(--text-mid);margin-bottom:10px">
+        系統累計 <strong style="color:var(--text)">${s.count}</strong> 筆評分，
+        平均 <strong style="color:var(--accent)">${avg} / 5</strong> 分
+      </div>${bars}`;
+  } catch {}
 }
 
 // ── Boot ───────────────────────────────────────────────────────────────────
