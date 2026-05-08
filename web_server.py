@@ -8,8 +8,10 @@ GCP:    uvicorn web_server:app --host 0.0.0.0 --port ${PORT:-8080}
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import re as _re
 import shutil
 import sys
 import threading
@@ -35,7 +37,188 @@ print(f"Python: {sys.executable}")
 VOICE_CONFIG_PATH     = os.getenv("VOICE_CONFIG_PATH", "voice_config.json")
 CHARACTER_CONFIG_PATH = os.getenv("CHARACTER_CONFIG_PATH", "character_config.json")
 CHARACTER_LIBRARY_DIR = "characters"
+SPEAKER_ICON_DIR      = "speaker_icons"
+SPEAKER_ICON_MANIFEST = os.path.join(SPEAKER_ICON_DIR, "manifest.json")
 PORT = int(os.getenv("PORT", "8080"))
+
+# ── Speaker icon cache ────────────────────────────────────────────────────────
+
+_icon_manifest: dict[str, str] = {}
+_icon_lock = threading.Lock()
+
+_GENSHIN_SLUG_OVERRIDES: dict[str, str] = {
+    "tartalia":     "tartaglia",   # misspelling in VITS speaker list
+    "fishl":        "fischl",
+    "player male":  "aether",
+    "player female":"lumine",
+}
+_GENSHIN_SKIP = {"oz"}            # Oz is Fischl's summon, not a playable character
+
+
+def _load_icon_manifest() -> None:
+    global _icon_manifest
+    try:
+        if os.path.exists(SPEAKER_ICON_MANIFEST):
+            with open(SPEAKER_ICON_MANIFEST, encoding="utf-8") as f:
+                _icon_manifest = json.load(f)
+    except Exception:
+        _icon_manifest = {}
+
+
+def _save_icon_manifest() -> None:
+    Path(SPEAKER_ICON_DIR).mkdir(exist_ok=True)
+    with open(SPEAKER_ICON_MANIFEST, "w", encoding="utf-8") as f:
+        json.dump(_icon_manifest, f, ensure_ascii=False, indent=2)
+
+
+def _speaker_cache_key(speaker: str) -> str:
+    return hashlib.sha1(speaker.encode()).hexdigest()[:16]
+
+
+def _parse_speaker(full_name: str) -> tuple[str, str]:
+    """Return (english_name, game) from e.g. '七七 Qiqi (Genshin Impact)'."""
+    m = _re.search(r'\((.+?)\)\s*$', full_name)
+    game = m.group(1).strip() if m else ""
+    base = full_name[:m.start()].strip() if m else full_name.strip()
+    eng  = " ".join(t for t in base.split() if t and all(ord(c) < 128 for c in t))
+    return eng.strip(), game
+
+
+def _img_get(req_lib, url: str, hdrs: dict, timeout: int = 10) -> bytes | None:
+    """Fetch a URL and return content only if it's a real image (> 2 KB)."""
+    try:
+        r = req_lib.get(url, headers=hdrs, allow_redirects=True, timeout=timeout)
+        if (r.status_code == 200
+                and r.headers.get("content-type", "").startswith("image")
+                and len(r.content) > 2048):
+            return r.content
+    except Exception:
+        pass
+    return None
+
+
+def _wiki_pageimages(req_lib, base: str, title: str, hdrs: dict, size: int = 300) -> bytes | None:
+    """Return the lead thumbnail of a MediaWiki page via the pageimages API."""
+    try:
+        r = req_lib.get(f"{base}/api.php", headers=hdrs, timeout=12, params={
+            "action": "query", "titles": title, "prop": "pageimages",
+            "pithumbsize": size, "format": "json", "origin": "*",
+        })
+        if r.status_code == 200:
+            for page in r.json().get("query", {}).get("pages", {}).values():
+                src = page.get("thumbnail", {}).get("source", "")
+                if src:
+                    return _img_get(req_lib, src, hdrs)
+    except Exception:
+        pass
+    return None
+
+
+def _wiki_page_scan(req_lib, base: str, title: str, hdrs: dict) -> bytes | None:
+    """Scan all images on a wiki page and return the best-looking portrait."""
+    name_key = title.lower().replace(" ", "")
+    try:
+        r = req_lib.get(f"{base}/api.php", headers=hdrs, timeout=12, params={
+            "action": "query", "titles": title, "prop": "images",
+            "imlimit": "20", "format": "json", "origin": "*",
+        })
+        if r.status_code != 200:
+            return None
+        images: list = []
+        for page in r.json().get("query", {}).get("pages", {}).values():
+            images = page.get("images", [])
+
+        def _score(img_info: dict) -> int:
+            t = img_info["title"].lower().replace("_", "").replace(" ", "")
+            if name_key in t:                                              return 0
+            if any(k in t for k in ("icon", "card", "portrait", "chara", "face")): return 1
+            if any(k in t for k in ("logo", "banner", "bg", "background", "item", "skill")): return 9
+            return 5
+
+        for img_info in sorted(images, key=_score)[:6]:
+            try:
+                r2 = req_lib.get(f"{base}/api.php", headers=hdrs, timeout=10, params={
+                    "action": "query", "titles": img_info["title"],
+                    "prop": "imageinfo", "iiprop": "url", "iiurlwidth": 300,
+                    "format": "json", "origin": "*",
+                })
+                if r2.status_code == 200:
+                    for p in r2.json().get("query", {}).get("pages", {}).values():
+                        ii = (p.get("imageinfo") or [{}])[0]
+                        url = ii.get("thumburl") or ii.get("url", "")
+                        if url:
+                            data = _img_get(req_lib, url, hdrs)
+                            if data:
+                                return data
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_icon_sync(english: str, game: str) -> bytes | None:
+    """Blocking fetch — run via asyncio.to_thread."""
+    import requests as _req
+    hdrs = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+    if game == "Genshin Impact":
+        eng_lower = english.lower()
+        if eng_lower in _GENSHIN_SKIP:
+            return None
+        slug = _GENSHIN_SLUG_OVERRIDES.get(
+            eng_lower,
+            eng_lower.replace(" ", "-").replace("'", "").replace(".", ""),
+        )
+        data = _img_get(_req, f"https://genshin.jmp.blue/characters/{slug}/icon", hdrs, 15)
+        if data:
+            return data
+        # Source 2: Enka Network CDN
+        enka_name = _GENSHIN_SLUG_OVERRIDES.get(eng_lower, english).replace(" ", "_")
+        return _img_get(_req, f"https://enka.network/ui/UI_AvatarIcon_{enka_name}.png", hdrs, 15)
+
+    elif game == "Umamusume Pretty Derby":
+        wiki_name = english.replace(" ", "_")
+        base = "https://umamusume.fandom.com"
+        # ① pageimages — lead thumbnail of the character wiki page
+        data = _wiki_pageimages(_req, base, english, hdrs)
+        if data:
+            return data
+        # ② scan all images listed on the page, pick the best portrait
+        data = _wiki_page_scan(_req, base, english, hdrs)
+        if data:
+            return data
+        # ③ Special:FilePath common naming patterns
+        for suffix in (f"{wiki_name}_Icon.png", f"{wiki_name}_icon.png",
+                       f"{wiki_name}_Portrait.png", f"{wiki_name}_Card.png"):
+            data = _img_get(_req, f"{base}/wiki/Special:FilePath/{suffix}", hdrs, 12)
+            if data:
+                return data
+
+    elif game == "Sanoba Witch":
+        # ① sanobawitch fandom (sparse, may fail)
+        data = _wiki_pageimages(_req, "https://sanobawitch.fandom.com", english, hdrs)
+        if data:
+            return data
+        # ② VNDB character API
+        try:
+            r = _req.post("https://api.vndb.org/kana/character",
+                          headers={**hdrs, "Content-Type": "application/json"},
+                          json={"filters": ["search", "=", english],
+                                "fields": "image.url", "results": 1},
+                          timeout=12)
+            if r.status_code == 200:
+                items = r.json().get("results", [])
+                if items:
+                    url = (items[0].get("image") or {}).get("url", "")
+                    if url:
+                        data = _img_get(_req, url, hdrs)
+                        if data:
+                            return data
+        except Exception:
+            pass
+
+    return None
 
 # ── Per-thread stdout → SSE bridge ────────────────────────────────────────────
 
@@ -103,6 +286,10 @@ class YoutubeUploadRequest(BaseModel):
 
 class CharSelectRequest(BaseModel):
     filename: str
+
+
+class SpeakerToCharRequest(BaseModel):
+    speaker: str
 
 
 # ── Pipeline helpers ──────────────────────────────────────────────────────────
@@ -329,6 +516,7 @@ def _run_pipeline(run_id: str, topic: str, loop: asyncio.AbstractEventLoop, test
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Path("static").mkdir(exist_ok=True)
+    _load_icon_manifest()
     if os.path.exists(VOICE_CONFIG_PATH):
         try:
             with open(VOICE_CONFIG_PATH, encoding="utf-8") as f:
@@ -553,6 +741,34 @@ async def select_character(role: str, req: CharSelectRequest):
     return {"ok": True}
 
 
+@app.post("/api/characters/{role}/from_speaker")
+async def char_from_speaker(role: str, req: SpeakerToCharRequest):
+    """Copy a cached speaker portrait into the characters library and assign it."""
+    from video_composer import CHARACTER_IMAGES
+    if role not in CHARACTER_IMAGES:
+        raise HTTPException(400, f"Invalid role '{role}'")
+    key = _speaker_cache_key(req.speaker)
+    with _icon_lock:
+        cached = _icon_manifest.get(key)
+    if not cached or cached == "not_found":
+        raise HTTPException(404, "Speaker icon not cached yet")
+    src = Path(SPEAKER_ICON_DIR) / cached
+    if not src.is_file():
+        raise HTTPException(404, "Cached icon file missing")
+    dest_name = f"_speaker_{key[:16]}.png"
+    dest = Path(CHARACTER_LIBRARY_DIR) / dest_name
+    import shutil
+    shutil.copy2(str(src), str(dest))
+    cfg = _load_char_config()
+    for r in CHARACTER_IMAGES:
+        if r not in cfg:
+            cfg[r] = CHARACTER_IMAGES[r]
+    cfg[role] = str(dest)
+    _save_char_config(cfg)
+    _apply_char_config(cfg)
+    return {"ok": True, "filename": dest_name}
+
+
 @app.get("/api/characters/{role}/preview")
 async def get_character_preview(role: str):
     from video_composer import CHARACTER_IMAGES
@@ -562,6 +778,63 @@ async def get_character_preview(role: str):
     if not path.is_file():
         raise HTTPException(404, "Character image not found")
     return FileResponse(str(path))
+
+
+@app.get("/api/speaker_icon")
+async def get_speaker_icon(speaker: str, retry: bool = False):
+    """Return a cached portrait for the given speaker name.
+
+    On first request the server fetches from external sources (Genshin API /
+    Umamusume fandom wiki) and caches the result locally.  Pass ?retry=true to
+    bypass a cached "not_found" result and try again.
+    """
+    key = _speaker_cache_key(speaker)
+
+    with _icon_lock:
+        cached = _icon_manifest.get(key)
+
+    if cached and not retry:
+        if cached == "not_found":
+            raise HTTPException(404, "Icon not available")
+        icon_path = Path(SPEAKER_ICON_DIR) / cached
+        if icon_path.is_file():
+            return FileResponse(str(icon_path), media_type="image/png")
+        # File missing from disk → re-fetch below
+
+    english, game = _parse_speaker(speaker)
+
+    try:
+        data = await asyncio.to_thread(_fetch_icon_sync, english, game)
+    except Exception:
+        data = None
+
+    if data is None:
+        with _icon_lock:
+            _icon_manifest[key] = "not_found"
+            _save_icon_manifest()
+        raise HTTPException(404, "Icon not available")
+
+    fname    = f"{key}.png"
+    out_path = Path(SPEAKER_ICON_DIR) / fname
+    out_path.parent.mkdir(exist_ok=True)
+    out_path.write_bytes(data)
+
+    with _icon_lock:
+        _icon_manifest[key] = fname
+        _save_icon_manifest()
+
+    return FileResponse(str(out_path), media_type="image/png")
+
+
+@app.post("/api/speaker_icon/retry_all")
+async def retry_all_not_found():
+    """Clear every 'not_found' entry from the manifest so they'll be re-fetched."""
+    with _icon_lock:
+        keys = [k for k, v in _icon_manifest.items() if v == "not_found"]
+        for k in keys:
+            del _icon_manifest[k]
+        _save_icon_manifest()
+    return {"cleared": len(keys)}
 
 
 @app.get("/api/voices")
