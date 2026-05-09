@@ -46,3 +46,4 @@ __pycache__/
 Thumbs.db
 desktop.ini
 speaker_icons/
+.claude/
