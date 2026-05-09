@@ -23,8 +23,9 @@ from moviepy import (
     VideoFileClip,
     concatenate_videoclips,
 )
+from moviepy import CompositeAudioClip
 from moviepy.video.fx import FadeOut, FadeIn
-from moviepy.audio.fx import AudioFadeOut
+from moviepy.audio.fx import AudioFadeOut, AudioLoop, MultiplyVolume
 
 # ── Video settings ────────────────────────────────────────────────────────────
 VIDEO_WIDTH = 720
@@ -498,6 +499,7 @@ def compose_video(
     chart_path: str | None = None,
     image_paths: list[str] | str | None = None,
     output_path: str = "output.mp4",
+    bgm_path: str | None = None,
 ) -> str:
     """Stitch dialogue clips into the final mp4.
 
@@ -581,6 +583,39 @@ def compose_video(
         print("  (backgrounds/outro.mov not found — skipping outro)")
         final = dialogue_final
 
+    # Mix in BGM
+    BGM_VOLUME = 0.15
+    bgm_clip = None
+    _bgm_file: str | None = None
+
+    if bgm_path == "":
+        print("  BGM disabled.")
+    elif bgm_path is not None:
+        _bgm_file = bgm_path
+    else:
+        # Auto-scan fallback
+        for bgm_name in ("bgm.mp3", "bgm.wav", "bgm.m4a"):
+            candidate = os.path.join("backgrounds", bgm_name)
+            if os.path.exists(candidate):
+                _bgm_file = candidate
+                break
+
+    if _bgm_file and os.path.exists(_bgm_file):
+        print(f"  Loading BGM: {_bgm_file}")
+        bgm_clip = AudioFileClip(_bgm_file)
+        bgm_clip = bgm_clip.with_effects([
+            AudioLoop(duration=final.duration),
+            MultiplyVolume(BGM_VOLUME),
+            AudioFadeOut(1.5),
+        ])
+        if final.audio is not None:
+            final = final.with_audio(CompositeAudioClip([final.audio, bgm_clip]))
+        else:
+            final = final.with_audio(bgm_clip)
+        print(f"  BGM mixed in at {int(BGM_VOLUME*100)}% volume")
+    elif bgm_path is None and _bgm_file is None:
+        print("  (no BGM found in backgrounds/ — skipping)")
+
     print(f"\nRendering video ({final.duration:.1f}s)... this may take a few minutes")
     try:
         final.write_videofile(
@@ -596,6 +631,11 @@ def compose_video(
         if outro_clip is not None:
             try:
                 outro_clip.close()
+            except Exception:
+                pass
+        if bgm_clip is not None:
+            try:
+                bgm_clip.close()
             except Exception:
                 pass
         for clip in clips:

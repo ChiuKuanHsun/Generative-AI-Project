@@ -38,6 +38,8 @@ VOICE_CONFIG_PATH     = os.getenv("VOICE_CONFIG_PATH", "voice_config.json")
 CHARACTER_CONFIG_PATH = os.getenv("CHARACTER_CONFIG_PATH", "character_config.json")
 RATINGS_PATH          = os.getenv("RATINGS_PATH", "ratings.jsonl")
 CHARACTER_LIBRARY_DIR = "characters"
+BGM_DIR               = "backgrounds"
+BGM_EXTENSIONS        = {".mp3", ".wav", ".m4a", ".aac", ".ogg"}
 SPEAKER_ICON_DIR      = "speaker_icons"
 SPEAKER_ICON_MANIFEST = os.path.join(SPEAKER_ICON_DIR, "manifest.json")
 PORT = int(os.getenv("PORT", "8080"))
@@ -274,6 +276,7 @@ _runs: dict[str, dict] = {}
 class RunRequest(BaseModel):
     topic: str
     test: bool = False
+    bgm_filename: str | None = None   # None=auto-scan  ""=disabled  "file.mp3"=explicit
 
 
 class VoiceConfig(BaseModel):
@@ -363,7 +366,7 @@ def _find_latest_output_dir() -> Path | None:
 # ── Pipeline thread ───────────────────────────────────────────────────────────
 
 
-def _run_pipeline(run_id: str, topic: str, loop: asyncio.AbstractEventLoop, test_mode: bool = False):
+def _run_pipeline(run_id: str, topic: str, loop: asyncio.AbstractEventLoop, test_mode: bool = False, bgm_filename: str | None = None):
     """Blocking pipeline — executed in a thread-pool worker."""
     run = _runs[run_id]
     queue: asyncio.Queue = run["queue"]
@@ -492,12 +495,19 @@ def _run_pipeline(run_id: str, topic: str, loop: asyncio.AbstractEventLoop, test
         step_start(5, "Composing video (MoviePy)")
         visuals = _interleave_visuals(image_paths, chart_paths)
         video_path = os.path.join(out_dir, "output.mp4")
+        resolved_bgm: str | None = None
+        if bgm_filename == "":
+            resolved_bgm = ""          # explicitly disabled
+        elif bgm_filename:
+            resolved_bgm = str(Path(BGM_DIR) / bgm_filename)
+
         compose_video(
             audio_data=audio_data,
             topic=dialogue_data.get("topic", topic),
             chart_path=chart_paths[0] if chart_paths else None,
             image_paths=visuals,
             output_path=video_path,
+            bgm_path=resolved_bgm,
         )
         video_url = _file_url(run_id, video_path)
         run["video_url"] = video_url
@@ -588,7 +598,7 @@ async def start_run(req: RunRequest):
     _runs[run_id] = run
 
     loop = asyncio.get_running_loop()
-    loop.run_in_executor(None, lambda: _run_pipeline(run_id, topic, loop, req.test))
+    loop.run_in_executor(None, lambda: _run_pipeline(run_id, topic, loop, req.test, req.bgm_filename))
     return {"run_id": run_id}
 
 
@@ -865,6 +875,58 @@ async def save_voices(config: VoiceConfig):
     from tts_generator import set_vits_voices
     set_vits_voices(cfg)
     return {"ok": True, "config": cfg}
+
+
+# ── BGM endpoints ─────────────────────────────────────────────────────────────
+
+@app.get("/api/bgm/list")
+async def list_bgm():
+    bgm_dir = Path(BGM_DIR)
+    files = []
+    if bgm_dir.is_dir():
+        for p in sorted(bgm_dir.iterdir()):
+            if p.suffix.lower() in BGM_EXTENSIONS:
+                files.append({
+                    "filename": p.name,
+                    "size_kb":  round(p.stat().st_size / 1024),
+                    "url":      f"/api/bgm/file/{p.name}",
+                })
+    return {"files": files}
+
+
+@app.post("/api/bgm/upload")
+async def upload_bgm(file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(400, "No filename")
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in BGM_EXTENSIONS:
+        raise HTTPException(400, f"Unsupported format: {suffix}. Use mp3/wav/m4a/aac/ogg.")
+    Path(BGM_DIR).mkdir(exist_ok=True)
+    dest = Path(BGM_DIR) / file.filename
+    content = await file.read()
+    dest.write_bytes(content)
+    return {"filename": file.filename, "size_kb": round(len(content) / 1024)}
+
+
+@app.get("/api/bgm/file/{filename}")
+async def get_bgm_file(filename: str):
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(403, "Forbidden")
+    path = Path(BGM_DIR) / filename
+    if not path.is_file():
+        raise HTTPException(404, "File not found")
+    return FileResponse(str(path))
+
+
+@app.delete("/api/bgm/file/{filename}")
+async def delete_bgm(filename: str):
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(403, "Forbidden")
+    path = Path(BGM_DIR) / filename
+    if not path.is_file():
+        raise HTTPException(404, "File not found")
+    path.unlink()
+    return {"ok": True}
 
 
 # ── Evaluation / rating endpoints ────────────────────────────────────────────

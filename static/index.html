@@ -554,6 +554,38 @@ video#videoPlayer {
 .stats-label { color: var(--text-dim); width: 14px; text-align: right; }
 .stats-count { color: var(--text-dim); width: 20px; }
 
+/* ── BGM card ── */
+.bgm-upload-row { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; }
+.bgm-upload-label {
+  font-size: 12px; color: var(--text-dim);
+}
+.bgm-list { display: flex; flex-direction: column; gap: 7px; }
+.bgm-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 14px; border-radius: 8px; cursor: pointer;
+  border: 1.5px solid var(--border); background: var(--surface-2);
+  transition: border-color .15s, background .15s;
+}
+.bgm-item:hover { border-color: var(--border-2); background: var(--surface); }
+.bgm-item.selected { border-color: var(--accent); background: var(--accent-dim); }
+.bgm-icon { font-size: 16px; flex-shrink: 0; }
+.bgm-name { flex: 1; font-size: 13px; color: var(--text); font-weight: 500; }
+.bgm-meta { font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
+.bgm-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.bgm-play-btn {
+  padding: 3px 9px; border-radius: 5px; font-size: 11px; font-weight: 600;
+  border: 1px solid var(--border-2); background: transparent;
+  color: var(--text-mid); cursor: pointer; transition: all .15s;
+}
+.bgm-play-btn:hover { border-color: var(--accent); color: var(--accent); }
+.bgm-play-btn.playing { border-color: var(--success); color: var(--success); }
+.bgm-del-btn {
+  padding: 3px 7px; border-radius: 5px; font-size: 11px;
+  border: 1px solid transparent; background: transparent;
+  color: var(--text-dim); cursor: pointer; transition: all .15s;
+}
+.bgm-del-btn:hover { border-color: var(--error); color: var(--error); }
+
 /* ── Hidden util ── */
 .hidden { display: none !important; }
 </style>
@@ -587,6 +619,20 @@ video#videoPlayer {
       <button class="btn btn-outline" id="testBtn" disabled title="Re-compose from latest output (no API cost)">⚡ Test</button>
       <span class="run-hint" id="generateHint">Select a topic to begin</span>
     </div>
+  </div>
+
+  <!-- BGM Card -->
+  <div class="card" id="bgmCard">
+    <div class="card-title"><div class="card-title-dot"></div>背景音樂 BGM</div>
+    <div class="bgm-upload-row">
+      <button class="btn btn-ghost" id="bgmUploadBtn">⬆ 上傳音樂</button>
+      <input type="file" id="bgmFileInput" accept=".mp3,.wav,.m4a,.aac,.ogg" style="display:none">
+      <span class="bgm-upload-label">支援 mp3 / wav / m4a · 放入 backgrounds/ 資料夾</span>
+    </div>
+    <div class="bgm-list" id="bgmList">
+      <div style="color:var(--text-dim);font-size:13px;padding:8px 0">載入中…</div>
+    </div>
+    <audio id="bgmPreviewAudio" style="display:none"></audio>
   </div>
 
   <!-- Pipeline Card -->
@@ -782,6 +828,7 @@ video#videoPlayer {
 const S = {
   topics: [],
   selectedKey: null,
+  selectedBgm: null,   // null=auto  ""=disabled  "filename.mp3"=explicit
   runId: null,
   es: null,
   voiceSelections: { gugugaga: null, meowchan: null },
@@ -835,6 +882,7 @@ async function init() {
   } catch (e) {
     showToast('Failed to load topics: ' + e.message);
   }
+  loadBgmList();
   try {
     const { available, dir } = await api('/api/has_test_assets');
     testBtn.disabled = !available;
@@ -933,7 +981,7 @@ async function startGeneration(testMode = false) {
     const { run_id } = await api('/api/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic, test: testMode }),
+      body: JSON.stringify({ topic, test: testMode, bgm_filename: S.selectedBgm }),
     });
     S.runId = run_id;
     openSSE(run_id);
@@ -1662,6 +1710,159 @@ function showToast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove('show'), 3200);
 }
+
+// ── BGM card ───────────────────────────────────────────────────────────────
+
+const bgmAudio = $('bgmPreviewAudio');
+let _bgmPlaying = null;  // filename currently playing
+
+async function loadBgmList() {
+  try {
+    const { files } = await api('/api/bgm/list');
+    renderBgmList(files);
+    // Auto-select first file if nothing chosen yet
+    if (S.selectedBgm === null) {
+      S.selectedBgm = files.length ? files[0].filename : '';
+    }
+    refreshBgmSelection();
+  } catch (e) {
+    $('bgmList').innerHTML = `<div style="color:var(--error);font-size:13px">載入失敗: ${e.message}</div>`;
+  }
+}
+
+function renderBgmList(files) {
+  const list = $('bgmList');
+  list.innerHTML = '';
+
+  // "無 BGM" option
+  list.appendChild(_makeBgmItem({ filename: '', label: '不使用 BGM', meta: '' }));
+
+  files.forEach(f => {
+    list.appendChild(_makeBgmItem({
+      filename: f.filename,
+      label: f.filename,
+      meta: `${f.size_kb} KB`,
+      url: f.url,
+      deletable: true,
+    }));
+  });
+}
+
+function _makeBgmItem({ filename, label, meta, url, deletable }) {
+  const item = document.createElement('div');
+  item.className = 'bgm-item';
+  item.dataset.filename = filename;
+
+  const icon = document.createElement('span');
+  icon.className = 'bgm-icon';
+  icon.textContent = filename ? '♪' : '🔇';
+
+  const name = document.createElement('span');
+  name.className = 'bgm-name';
+  name.textContent = label;
+
+  const metaEl = document.createElement('span');
+  metaEl.className = 'bgm-meta';
+  metaEl.textContent = meta;
+
+  const acts = document.createElement('div');
+  acts.className = 'bgm-actions';
+
+  if (url) {
+    const playBtn = document.createElement('button');
+    playBtn.className = 'bgm-play-btn';
+    playBtn.dataset.filename = filename;
+    playBtn.textContent = '▶ 試聽';
+    playBtn.onclick = e => { e.stopPropagation(); toggleBgmPreview(filename, url, playBtn); };
+    acts.appendChild(playBtn);
+  }
+
+  if (deletable) {
+    const delBtn = document.createElement('button');
+    delBtn.className = 'bgm-del-btn';
+    delBtn.textContent = '🗑';
+    delBtn.title = '刪除';
+    delBtn.onclick = async e => {
+      e.stopPropagation();
+      if (!confirm(`刪除 ${filename}？`)) return;
+      try {
+        await api(`/api/bgm/file/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+        if (S.selectedBgm === filename) S.selectedBgm = '';
+        if (_bgmPlaying === filename) { bgmAudio.pause(); _bgmPlaying = null; }
+        showToast(`✓ 已刪除 ${filename}`);
+        loadBgmList();
+      } catch (err) { showToast('✗ ' + err.message); }
+    };
+    acts.appendChild(delBtn);
+  }
+
+  item.appendChild(icon);
+  item.appendChild(name);
+  item.appendChild(metaEl);
+  item.appendChild(acts);
+
+  item.addEventListener('click', () => {
+    S.selectedBgm = filename;
+    refreshBgmSelection();
+  });
+
+  return item;
+}
+
+function refreshBgmSelection() {
+  $('bgmList').querySelectorAll('.bgm-item').forEach(el => {
+    el.classList.toggle('selected', el.dataset.filename === S.selectedBgm);
+  });
+}
+
+function toggleBgmPreview(filename, url, btn) {
+  if (_bgmPlaying === filename) {
+    bgmAudio.pause();
+    _bgmPlaying = null;
+    btn.textContent = '▶ 試聽';
+    btn.classList.remove('playing');
+  } else {
+    // Stop previous
+    document.querySelectorAll('.bgm-play-btn.playing').forEach(b => {
+      b.textContent = '▶ 試聽'; b.classList.remove('playing');
+    });
+    bgmAudio.src = url;
+    bgmAudio.play().catch(() => {});
+    _bgmPlaying = filename;
+    btn.textContent = '⏹ 停止';
+    btn.classList.add('playing');
+  }
+}
+
+bgmAudio.onended = () => {
+  _bgmPlaying = null;
+  document.querySelectorAll('.bgm-play-btn.playing').forEach(b => {
+    b.textContent = '▶ 試聽'; b.classList.remove('playing');
+  });
+};
+
+// Upload
+$('bgmUploadBtn').onclick = () => $('bgmFileInput').click();
+$('bgmFileInput').onchange = async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  $('bgmUploadBtn').disabled = true;
+  $('bgmUploadBtn').textContent = '⏳ 上傳中…';
+  try {
+    const form = new FormData();
+    form.append('file', file);
+    const { filename, size_kb } = await api('/api/bgm/upload', { method: 'POST', body: form });
+    showToast(`✓ 已上傳 ${filename} (${size_kb} KB)`);
+    S.selectedBgm = filename;
+    loadBgmList();
+  } catch (err) {
+    showToast('✗ ' + err.message);
+  } finally {
+    $('bgmUploadBtn').disabled = false;
+    $('bgmUploadBtn').textContent = '⬆ 上傳音樂';
+    $('bgmFileInput').value = '';
+  }
+};
 
 // ── Evaluation card ────────────────────────────────────────────────────────
 
