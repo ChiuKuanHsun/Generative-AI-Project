@@ -37,12 +37,17 @@ print(f"Python: {sys.executable}")
 VOICE_CONFIG_PATH     = os.getenv("VOICE_CONFIG_PATH", "voice_config.json")
 CHARACTER_CONFIG_PATH = os.getenv("CHARACTER_CONFIG_PATH", "character_config.json")
 RATINGS_PATH          = os.getenv("RATINGS_PATH", "ratings.jsonl")
+COMFYUI_CONFIG_PATH   = os.getenv("COMFYUI_CONFIG_PATH", "comfyui_config.json")
 CHARACTER_LIBRARY_DIR = "characters"
 BGM_DIR               = "backgrounds"
 BGM_EXTENSIONS        = {".mp3", ".wav", ".m4a", ".aac", ".ogg"}
 SPEAKER_ICON_DIR      = "speaker_icons"
 SPEAKER_ICON_MANIFEST = os.path.join(SPEAKER_ICON_DIR, "manifest.json")
 PORT = int(os.getenv("PORT", "8080"))
+
+# ── ComfyUI runtime state ─────────────────────────────────────────────────────
+_comfyui_url: str = ""
+_char_tasks: dict[str, asyncio.Queue] = {}
 
 # ── Speaker icon cache ────────────────────────────────────────────────────────
 
@@ -301,6 +306,15 @@ class RatingRequest(BaseModel):
     feedback: str = ""
 
 
+class ComfyUIConfig(BaseModel):
+    url: str
+
+
+class CharGenRequest(BaseModel):
+    prompt: str
+    role: str = ""   # "gugugaga" | "meowchan" | "" (no assignment)
+
+
 # ── Pipeline helpers ──────────────────────────────────────────────────────────
 
 
@@ -327,6 +341,21 @@ def _file_url(run_id: str, path: str) -> str:
 
 
 # ── Character config helpers ──────────────────────────────────────────────────
+
+def _load_comfyui_config() -> None:
+    global _comfyui_url
+    try:
+        if os.path.exists(COMFYUI_CONFIG_PATH):
+            with open(COMFYUI_CONFIG_PATH, encoding="utf-8") as f:
+                _comfyui_url = json.load(f).get("url", "")
+    except Exception:
+        pass
+
+
+def _save_comfyui_config() -> None:
+    with open(COMFYUI_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump({"url": _comfyui_url}, f)
+
 
 def _load_char_config() -> dict:
     try:
@@ -541,12 +570,20 @@ async def lifespan(app: FastAPI):
             set_vits_voices(cfg)
         except Exception:
             pass
+    # Snapshot original defaults BEFORE applying user config — used to
+    # restore a role when its currently-assigned image is deleted.
+    try:
+        from video_composer import CHARACTER_IMAGES as _CI
+        _CHARACTER_DEFAULTS.update(_CI)
+    except Exception:
+        pass
     char_cfg = _load_char_config()
     if char_cfg:
         try:
             _apply_char_config(char_cfg)
         except Exception:
             pass
+    _load_comfyui_config()
     yield
 
 
@@ -737,6 +774,40 @@ async def get_library_image(filename: str):
     return FileResponse(str(path))
 
 
+_CHARACTER_DEFAULTS: dict[str, str] = {}
+
+
+@app.delete("/api/characters/library/{filename}")
+async def delete_library_image(filename: str):
+    """Delete an image from the characters library."""
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(403, "Forbidden")
+    path = Path(CHARACTER_LIBRARY_DIR) / filename
+    if not path.is_file():
+        raise HTTPException(404, "Image not found")
+
+    # If any role is using this image, revert to original default
+    from video_composer import CHARACTER_IMAGES, _char_cache
+    cfg = _load_char_config()
+    cleared_roles: list[str] = []
+    for role, current in list(cfg.items()):
+        try:
+            same = Path(current).resolve() == path.resolve()
+        except Exception:
+            same = False
+        if same:
+            cfg.pop(role)
+            cleared_roles.append(role)
+            default = _CHARACTER_DEFAULTS.get(role, current)
+            CHARACTER_IMAGES[role] = default
+            _char_cache.pop(role, None)
+    if cleared_roles:
+        _save_char_config(cfg)
+
+    path.unlink()
+    return {"ok": True, "cleared_roles": cleared_roles}
+
+
 @app.post("/api/characters/{role}/select")
 async def select_character(role: str, req: CharSelectRequest):
     from video_composer import CHARACTER_IMAGES
@@ -856,7 +927,8 @@ async def retry_all_not_found():
 @app.get("/api/voices")
 async def get_voices():
     from tts_generator import get_vits_speakers
-    speakers = get_vits_speakers()
+    # Run blocking HuggingFace fetch in a thread so it doesn't lock the event loop
+    speakers = await asyncio.to_thread(get_vits_speakers)
     current: dict = {}
     if os.path.exists(VOICE_CONFIG_PATH):
         try:
@@ -972,6 +1044,109 @@ async def get_stats():
         "distribution": dist,
         "recent":       entries[-5:],
     }
+
+
+# ── ComfyUI config endpoints ──────────────────────────────────────────────────
+
+@app.get("/api/config/comfyui")
+async def get_comfyui_config():
+    return {"url": _comfyui_url}
+
+
+@app.post("/api/config/comfyui")
+async def set_comfyui_config(cfg: ComfyUIConfig):
+    global _comfyui_url
+    _comfyui_url = cfg.url.strip()
+    _save_comfyui_config()
+    return {"ok": True, "url": _comfyui_url}
+
+
+@app.post("/api/config/comfyui/test")
+async def test_comfyui_connection():
+    if not _comfyui_url:
+        raise HTTPException(400, "ComfyUI URL not configured")
+    from character_generator import test_connection
+    ok = await test_connection(_comfyui_url)
+    if not ok:
+        raise HTTPException(503, "Cannot connect to ComfyUI server")
+    return {"ok": True}
+
+
+# ── Character generation endpoint (streaming) ────────────────────────────────
+
+async def _run_char_gen_task(task_id: str, prompt: str, role: str):
+    """Background task: stream ComfyUI events to the task's queue."""
+    queue = _char_tasks[task_id]
+    from character_generator import generate_character_image_streaming
+
+    try:
+        async for event in generate_character_image_streaming(prompt, _comfyui_url):
+            if event["type"] == "done":
+                path = event["path"]
+
+                # Auto-assign to role if specified
+                if role:
+                    try:
+                        from video_composer import CHARACTER_IMAGES
+                        if role in CHARACTER_IMAGES:
+                            cfg = _load_char_config()
+                            for r in CHARACTER_IMAGES:
+                                if r not in cfg:
+                                    cfg[r] = CHARACTER_IMAGES[r]
+                            cfg[role] = path
+                            _save_char_config(cfg)
+                            _apply_char_config(cfg)
+                    except Exception:
+                        pass
+
+                filename = Path(path).name
+                await queue.put({
+                    "type":     "done",
+                    "filename": filename,
+                    "url":      f"/api/characters/images/{filename}",
+                })
+            else:
+                await queue.put(event)
+    except Exception as exc:
+        await queue.put({"type": "error", "error": str(exc)})
+    finally:
+        await queue.put(None)  # sentinel
+
+
+@app.post("/api/character/generate")
+async def generate_character_api(req: CharGenRequest):
+    if not _comfyui_url:
+        raise HTTPException(400, "ComfyUI URL 尚未設定，請先在 AI 角色生成卡片中填入網址")
+    if not req.prompt.strip():
+        raise HTTPException(400, "Prompt cannot be empty")
+
+    task_id = uuid.uuid4().hex[:8]
+    _char_tasks[task_id] = asyncio.Queue()
+    asyncio.create_task(_run_char_gen_task(task_id, req.prompt.strip(), req.role))
+    return {"task_id": task_id}
+
+
+@app.get("/api/character/{task_id}/stream")
+async def stream_char_gen(task_id: str):
+    if task_id not in _char_tasks:
+        raise HTTPException(404, "Task not found")
+    queue = _char_tasks[task_id]
+
+    async def generate():
+        try:
+            while True:
+                msg = await queue.get()
+                if msg is None:
+                    return
+                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+        finally:
+            _char_tasks.pop(task_id, None)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── Dev entry point ───────────────────────────────────────────────────────────

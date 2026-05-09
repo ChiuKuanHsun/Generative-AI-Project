@@ -495,6 +495,22 @@ video#videoPlayer {
 .lib-item.sel-g .lib-assign-g { opacity: 1; background: rgba(245,158,11,.12); }
 .lib-item.sel-m .lib-assign-m { opacity: 1; background: rgba(59,130,246,.12); }
 
+/* Floating delete button in image corner */
+.lib-del-float {
+  position: absolute; top: 4px; right: 4px;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: rgba(239, 68, 68, .92);
+  color: #fff; border: 1.5px solid rgba(255,255,255,.2);
+  cursor: pointer; padding: 0; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 700;
+  box-shadow: 0 2px 8px rgba(0,0,0,.4);
+  opacity: 0; transition: opacity .15s, transform .12s, background .12s;
+  z-index: 2;
+}
+.lib-img-wrap:hover .lib-del-float { opacity: 1; }
+.lib-del-float:hover { background: #dc2626; transform: scale(1.12); }
+
 /* ── Characters modal tabs ── */
 .char-tabs {
   display: flex; gap: 4px; margin-bottom: 12px;
@@ -586,6 +602,50 @@ video#videoPlayer {
 }
 .bgm-del-btn:hover { border-color: var(--error); color: var(--error); }
 
+/* ── ComfyUI card ── */
+.comfyui-url-row {
+  display: flex; gap: 10px; align-items: center; margin-bottom: 10px;
+}
+.comfyui-url-row input {
+  flex: 1; padding: 9px 14px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface-2);
+  color: var(--text); font-size: 13px; font-family: inherit; outline: none;
+  transition: border-color .18s;
+}
+.comfyui-url-row input:focus { border-color: var(--accent); }
+.comfyui-url-row input::placeholder { color: var(--text-dim); }
+.comfyui-status {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--text-dim); margin-bottom: 16px;
+}
+.comfyui-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--border-2); flex-shrink: 0; transition: background .3s;
+}
+.comfyui-dot.ok  { background: var(--success); box-shadow: 0 0 6px rgba(34,197,94,.5); }
+.comfyui-dot.err { background: var(--error); }
+.comfyui-sep {
+  border: none; border-top: 1px solid var(--border); margin-bottom: 14px;
+}
+.comfyui-prompt-row {
+  margin-bottom: 10px;
+}
+.comfyui-prompt-row input {
+  width: 100%; padding: 9px 14px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface-2);
+  color: var(--text); font-size: 13px; font-family: inherit; outline: none;
+  transition: border-color .18s;
+}
+.comfyui-prompt-row input:focus { border-color: var(--accent); }
+.comfyui-prompt-row input::placeholder { color: var(--text-dim); }
+.comfyui-gen-btns { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.comfyui-gen-result {
+  padding: 8px 12px; border-radius: 6px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  font-size: 12px; color: var(--text-dim);
+  display: flex; align-items: center; gap: 10px;
+}
+
 /* ── Hidden util ── */
 .hidden { display: none !important; }
 </style>
@@ -633,6 +693,37 @@ video#videoPlayer {
       <div style="color:var(--text-dim);font-size:13px;padding:8px 0">載入中…</div>
     </div>
     <audio id="bgmPreviewAudio" style="display:none"></audio>
+  </div>
+
+  <!-- ComfyUI Card -->
+  <div class="card" id="comfyuiCard">
+    <div class="card-title"><div class="card-title-dot"></div>🎨 AI 角色生成 · ComfyUI</div>
+
+    <!-- URL row -->
+    <div class="comfyui-url-row">
+      <input type="text" id="comfyuiUrlInput" placeholder="https://xxxx.ngrok-free.app (Kaggle 產生的 ngrok URL)" autocomplete="off" spellcheck="false" />
+      <button class="btn btn-ghost" id="comfyuiSaveBtn">儲存</button>
+      <button class="btn btn-outline" id="comfyuiTestBtn">測試連線</button>
+    </div>
+    <div class="comfyui-status">
+      <span class="comfyui-dot" id="comfyuiDot"></span>
+      <span id="comfyuiStatusText">尚未設定 · 填入 Kaggle ngrok URL 後儲存</span>
+    </div>
+
+    <hr class="comfyui-sep">
+
+    <!-- Generate row -->
+    <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px">輸入提示詞生成角色圖片，自動加入圖片庫並指派角色</div>
+    <div class="comfyui-prompt-row">
+      <input type="text" id="comfyuiPrompt"
+        placeholder="e.g. cute anime girl, financial analyst, professional suit, white background" />
+    </div>
+    <div class="comfyui-gen-btns">
+      <button class="btn btn-accent" id="comfyuiGenG" disabled>🐔 生成 gugugaga</button>
+      <button class="btn btn-accent" id="comfyuiGenM" disabled>🐱 生成 meowchan</button>
+      <button class="btn btn-ghost"  id="comfyuiGenFree" disabled>🎨 只生成（不指派）</button>
+    </div>
+    <div class="comfyui-gen-result hidden" id="comfyuiGenResult"></div>
   </div>
 
   <!-- Pipeline Card -->
@@ -883,6 +974,7 @@ async function init() {
     showToast('Failed to load topics: ' + e.message);
   }
   loadBgmList();
+  loadComfyuiConfig();
   try {
     const { available, dir } = await api('/api/has_test_assets');
     testBtn.disabled = !available;
@@ -1246,8 +1338,10 @@ const _charSpCards = new Map();
 
 function openCharsModal() {
   charsModal.classList.add('open');
+  // Load library + current previews FIRST (fast, local) so they show immediately
   charLoadLibrary();
-  charBuildSpeakerGrid();
+  // Defer the slow HuggingFace fetch to the next tick so library renders first
+  setTimeout(() => charBuildSpeakerGrid(), 0);
 }
 function closeCharsModal() { charsModal.classList.remove('open'); }
 
@@ -1444,6 +1538,14 @@ function charRenderGrid() {
       wrap.appendChild(badges);
     }
 
+    // Floating delete button (top-right corner of image)
+    const delFloat = document.createElement('button');
+    delFloat.className = 'lib-del-float';
+    delFloat.textContent = '✕';
+    delFloat.title = '刪除這張圖片';
+    delFloat.onclick = (e) => { e.stopPropagation(); charDeleteImage(filename); };
+    wrap.appendChild(delFloat);
+
     const acts = document.createElement('div');
     acts.className = 'lib-actions';
     ['gugugaga', 'meowchan'].forEach(role => {
@@ -1459,6 +1561,27 @@ function charRenderGrid() {
     item.appendChild(acts);
     grid.appendChild(item);
   });
+}
+
+async function charDeleteImage(filename) {
+  if (!confirm(`刪除「${filename}」？\n如果有角色正在使用這張圖片，會回復為預設。`)) return;
+  try {
+    const { cleared_roles } = await api(
+      `/api/characters/library/${encodeURIComponent(filename)}`,
+      { method: 'DELETE' },
+    );
+    SC.images = SC.images.filter(img => img.filename !== filename);
+    if (cleared_roles && cleared_roles.length) {
+      cleared_roles.forEach(r => { delete SC.current[r]; });
+      charRenderPreviews();
+      showToast(`✓ 已刪除 · ${cleared_roles.join(', ')} 已回復預設`);
+    } else {
+      showToast(`✓ 已刪除 ${filename}`);
+    }
+    charRenderGrid();
+  } catch (e) {
+    showToast('✗ 刪除失敗：' + e.message);
+  }
 }
 
 function normFname(p) {
@@ -1863,6 +1986,158 @@ $('bgmFileInput').onchange = async e => {
     $('bgmFileInput').value = '';
   }
 };
+
+// ── ComfyUI card ───────────────────────────────────────────────────────────
+
+let _comfyuiConnected = false;
+
+async function loadComfyuiConfig() {
+  try {
+    const { url } = await api('/api/config/comfyui');
+    if (url) {
+      $('comfyuiUrlInput').value = url;
+      setComfyuiStatus('idle', `已儲存：${url}`);
+    }
+  } catch {}
+}
+
+function setComfyuiStatus(type, text) {
+  const dot = $('comfyuiDot');
+  const txt = $('comfyuiStatusText');
+  dot.className = 'comfyui-dot';
+  _comfyuiConnected = type === 'ok';
+  if (type === 'ok')  dot.classList.add('ok');
+  if (type === 'err') dot.classList.add('err');
+  txt.textContent = text;
+  ['comfyuiGenG', 'comfyuiGenM', 'comfyuiGenFree'].forEach(id => {
+    $(id).disabled = !_comfyuiConnected;
+  });
+}
+
+$('comfyuiSaveBtn').onclick = async () => {
+  const url = $('comfyuiUrlInput').value.trim();
+  if (!url) { showToast('請輸入 ComfyUI 網址'); return; }
+  const btn = $('comfyuiSaveBtn');
+  btn.disabled = true; btn.textContent = '儲存中…';
+  try {
+    await api('/api/config/comfyui', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    showToast('✓ 已儲存 ComfyUI URL');
+    setComfyuiStatus('idle', `已儲存：${url}（點「測試連線」確認）`);
+  } catch (e) {
+    showToast('✗ ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = '儲存';
+  }
+};
+
+$('comfyuiTestBtn').onclick = async () => {
+  const btn = $('comfyuiTestBtn');
+  btn.disabled = true; btn.textContent = '測試中…';
+  setComfyuiStatus('idle', '連線測試中…');
+  try {
+    await api('/api/config/comfyui/test', { method: 'POST' });
+    setComfyuiStatus('ok', '● 已連線 · ComfyUI 運行中，可以生成角色圖片');
+    showToast('✓ ComfyUI 連線成功！');
+  } catch (e) {
+    setComfyuiStatus('err', '● 連線失敗 · ' + e.message);
+    showToast('✗ 連線失敗：' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = '測試連線';
+  }
+};
+
+function _renderCharProgress(roleLabel, value, max) {
+  const pct = max > 0 ? Math.round((value / max) * 100) : 0;
+  return `
+    <div style="flex:1">
+      <div style="font-size:12px;color:var(--text-mid);margin-bottom:6px;display:flex;justify-content:space-between">
+        <span>⚡ 生成中 (${roleLabel}) · ${value}/${max} steps</span>
+        <span style="color:var(--accent);font-weight:600">${pct}%</span>
+      </div>
+      <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:var(--accent);transition:width .25s ease-out"></div>
+      </div>
+    </div>
+  `;
+}
+
+async function doGenerateChar(role) {
+  const prompt = $('comfyuiPrompt').value.trim();
+  if (!prompt) { showToast('請輸入提示詞'); return; }
+
+  const roleLabel = role === 'gugugaga' ? '🐔 gugugaga'
+                  : role === 'meowchan' ? '🐱 meowchan' : '自由生成';
+  const resultEl = $('comfyuiGenResult');
+  resultEl.classList.remove('hidden');
+  resultEl.innerHTML = `<span>⏳ 提交任務…</span>`;
+
+  const btnIds = ['comfyuiGenG', 'comfyuiGenM', 'comfyuiGenFree'];
+  btnIds.forEach(id => $(id).disabled = true);
+
+  let es = null;
+
+  try {
+    // 1. Start task — get task_id
+    const { task_id } = await api('/api/character/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, role }),
+    });
+
+    // 2. Open SSE for progress
+    await new Promise((resolve, reject) => {
+      es = new EventSource(`/api/character/${task_id}/stream`);
+
+      es.onmessage = (ev) => {
+        const data = JSON.parse(ev.data);
+
+        if (data.type === 'queued') {
+          resultEl.innerHTML = `<span>📋 已排入佇列…</span>`;
+        }
+        else if (data.type === 'progress') {
+          resultEl.innerHTML = _renderCharProgress(roleLabel, data.value, data.max);
+        }
+        else if (data.type === 'executing' && data.node) {
+          // Show node name when between progress events (e.g. VAE decode)
+          if (!resultEl.querySelector('.bar-fill')) {
+            resultEl.innerHTML = `<span>⚙ 處理節點 ${data.node}…</span>`;
+          }
+        }
+        else if (data.type === 'done') {
+          es.close();
+          resultEl.innerHTML =
+            `<span style="color:var(--success)">✓ 生成完成！${role ? ` 已指派給 ${roleLabel}` : ''}</span>` +
+            `<img src="${data.url}" style="height:64px;border-radius:6px;border:1px solid var(--border);object-fit:contain;background:#0c101e">`;
+          showToast(`✓ 角色圖片已生成：${data.filename}`);
+          resolve();
+        }
+        else if (data.type === 'error') {
+          es.close();
+          reject(new Error(data.error));
+        }
+      };
+
+      es.onerror = () => {
+        if (es) es.close();
+        reject(new Error('SSE connection lost'));
+      };
+    });
+  } catch (e) {
+    if (es) es.close();
+    resultEl.innerHTML = `<span style="color:var(--error)">✗ 生成失敗：${e.message}</span>`;
+    showToast('✗ ' + e.message);
+  } finally {
+    btnIds.forEach(id => $(id).disabled = !_comfyuiConnected);
+  }
+}
+
+$('comfyuiGenG').onclick    = () => doGenerateChar('gugugaga');
+$('comfyuiGenM').onclick    = () => doGenerateChar('meowchan');
+$('comfyuiGenFree').onclick = () => doGenerateChar('');
 
 // ── Evaluation card ────────────────────────────────────────────────────────
 
