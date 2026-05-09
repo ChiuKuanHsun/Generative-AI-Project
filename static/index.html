@@ -646,6 +646,26 @@ video#videoPlayer {
   display: flex; align-items: center; gap: 10px;
 }
 
+/* ── ComfyUI editor bar ── */
+.comfyui-editor-bar {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border);
+}
+.comfyui-editor-hint {
+  font-size: 11px; color: var(--text-dim); flex: 1; min-width: 200px;
+}
+.comfyui-wf-status {
+  margin-top: 10px; padding: 8px 12px; border-radius: 6px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  font-size: 12px; color: var(--text-mid);
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+}
+.comfyui-wf-status.active {
+  background: var(--accent-dim); border-color: var(--accent);
+  color: var(--accent);
+}
+.comfyui-wf-status .wf-meta { font-size: 10px; opacity: .75; font-family: 'JetBrains Mono', monospace; }
+
 /* ── Hidden util ── */
 .hidden { display: none !important; }
 </style>
@@ -724,6 +744,22 @@ video#videoPlayer {
       <button class="btn btn-ghost"  id="comfyuiGenFree" disabled>🎨 只生成（不指派）</button>
     </div>
     <div class="comfyui-gen-result hidden" id="comfyuiGenResult"></div>
+
+    <!-- Editor toggle + workflow management -->
+    <div class="comfyui-editor-bar">
+      <button class="btn btn-outline" id="comfyuiOpenTabBtn">🎨 在新分頁開啟編輯器</button>
+      <button class="btn btn-ghost"   id="comfyuiDlWorkflowBtn">⬇ 下載預設</button>
+      <button class="btn btn-ghost"   id="comfyuiUploadWfBtn">⬆ 上傳自訂 Workflow</button>
+      <input type="file" id="comfyuiWfFileInput" accept=".json,application/json" style="display:none">
+      <button class="btn btn-ghost"   id="comfyuiResetWfBtn" style="display:none">↻ 還原預設</button>
+    </div>
+    <div class="comfyui-wf-status" id="comfyuiWfStatus">
+      ◆ 使用內建預設 workflow（Animagine XL · 28 steps）
+    </div>
+    <div style="font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.65">
+      編輯流程：ComfyUI 內 <b>Workflow → Export (API Format)</b> → 上傳到這裡 → 生成時自動套用<br>
+      可在正向 prompt 節點寫 <code style="color:var(--accent);background:var(--surface-2);padding:1px 5px;border-radius:3px;font-family:'JetBrains Mono',monospace">{prompt}</code> 當佔位符（例：<code style="color:var(--text-mid);background:var(--surface-2);padding:1px 5px;border-radius:3px">masterpiece, {prompt}, best quality</code>）
+    </div>
   </div>
 
   <!-- Pipeline Card -->
@@ -975,6 +1011,7 @@ async function init() {
   }
   loadBgmList();
   loadComfyuiConfig();
+  refreshWorkflowStatus();
   try {
     const { available, dir } = await api('/api/has_test_assets');
     testBtn.disabled = !available;
@@ -2040,10 +2077,10 @@ $('comfyuiTestBtn').onclick = async () => {
   setComfyuiStatus('idle', '連線測試中…');
   try {
     await api('/api/config/comfyui/test', { method: 'POST' });
-    setComfyuiStatus('ok', '● 已連線 · ComfyUI 運行中，可以生成角色圖片');
+    setComfyuiStatus('ok', '已連線 · ComfyUI 運行中，可以生成角色圖片');
     showToast('✓ ComfyUI 連線成功！');
   } catch (e) {
-    setComfyuiStatus('err', '● 連線失敗 · ' + e.message);
+    setComfyuiStatus('err', '連線失敗 · ' + e.message);
     showToast('✗ 連線失敗：' + e.message);
   } finally {
     btn.disabled = false; btn.textContent = '測試連線';
@@ -2138,6 +2175,104 @@ async function doGenerateChar(role) {
 $('comfyuiGenG').onclick    = () => doGenerateChar('gugugaga');
 $('comfyuiGenM').onclick    = () => doGenerateChar('meowchan');
 $('comfyuiGenFree').onclick = () => doGenerateChar('');
+
+// ── ComfyUI editor (new tab) ───────────────────────────────────────────────
+
+$('comfyuiOpenTabBtn').onclick = () => {
+  const url = $('comfyuiUrlInput').value.trim();
+  if (!url) { showToast('請先儲存 ComfyUI URL'); return; }
+  window.open(url, '_blank');
+};
+
+// Refresh workflow status badge
+async function refreshWorkflowStatus() {
+  const status   = $('comfyuiWfStatus');
+  const resetBtn = $('comfyuiResetWfBtn');
+  try {
+    const info = await api('/api/comfyui/workflow/info');
+    if (info.active) {
+      const types = info.node_types
+        ? Object.entries(info.node_types).map(([k, v]) => v > 1 ? `${k}×${v}` : k).join(' · ')
+        : '';
+      const ts = info.modified ? new Date(info.modified).toLocaleString() : '';
+      status.classList.add('active');
+      status.innerHTML = `
+        <span>✓ 使用自訂 workflow · ${info.node_count} 個節點</span>
+        <span class="wf-meta">${ts}</span>
+      `;
+      resetBtn.style.display = '';
+      if (types) status.title = types;
+    } else {
+      status.classList.remove('active');
+      status.innerHTML = `<span>◆ 使用內建預設 workflow（Animagine XL · 28 steps）</span>`;
+      resetBtn.style.display = 'none';
+    }
+  } catch {
+    status.classList.remove('active');
+    status.innerHTML = `<span>◆ 使用內建預設 workflow</span>`;
+    resetBtn.style.display = 'none';
+  }
+}
+
+$('comfyuiUploadWfBtn').onclick = () => $('comfyuiWfFileInput').click();
+
+$('comfyuiWfFileInput').onchange = async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const btn = $('comfyuiUploadWfBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ 上傳中…';
+  try {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch('/api/comfyui/workflow', { method: 'POST', body: form });
+    const text = await res.text();
+    if (!res.ok) {
+      let msg = text;
+      try { msg = JSON.parse(text).detail || msg; } catch {}
+      throw new Error(msg);
+    }
+    const { node_count } = JSON.parse(text);
+    showToast(`✓ Workflow 已套用（${node_count} 個節點）`);
+    await refreshWorkflowStatus();
+  } catch (err) {
+    showToast('✗ ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⬆ 上傳自訂 Workflow';
+    $('comfyuiWfFileInput').value = '';
+  }
+};
+
+$('comfyuiResetWfBtn').onclick = async () => {
+  if (!confirm('還原為內建預設 workflow？\n你的自訂 workflow 會被刪除。')) return;
+  try {
+    await api('/api/comfyui/workflow', { method: 'DELETE' });
+    showToast('✓ 已還原預設 workflow');
+    await refreshWorkflowStatus();
+  } catch (e) {
+    showToast('✗ ' + e.message);
+  }
+};
+
+$('comfyuiDlWorkflowBtn').onclick = async () => {
+  try {
+    const r = await fetch('/api/comfyui/default-workflow');
+    if (!r.ok) throw new Error('Failed to fetch');
+    const json = await r.json();
+    const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'finvid-default-workflow.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+    showToast('✓ 已下載 · 拖入 ComfyUI 編輯器即可載入');
+  } catch (e) {
+    showToast('✗ 下載失敗：' + e.message);
+  }
+};
 
 // ── Evaluation card ────────────────────────────────────────────────────────
 

@@ -7,7 +7,9 @@ Uses SDXL-Turbo for fast generation (4 steps, ~5-10s on T4).
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
+import os
 import random
 import uuid
 from pathlib import Path
@@ -17,15 +19,106 @@ import httpx
 import websockets
 
 
+ACTIVE_WORKFLOW_PATH = os.getenv("ACTIVE_WORKFLOW_PATH", "active_workflow.json")
+
+
+# ── Active workflow management ────────────────────────────────────────────────
+
+def _load_active_workflow() -> dict | None:
+    """Return user's saved workflow, or None if not set."""
+    if not os.path.exists(ACTIVE_WORKFLOW_PATH):
+        return None
+    try:
+        with open(ACTIVE_WORKFLOW_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def validate_workflow(wf: dict) -> tuple[bool, str]:
+    """Sanity-check an uploaded workflow. Returns (ok, reason)."""
+    if not isinstance(wf, dict) or not wf:
+        return False, "Workflow must be a non-empty dict"
+    # Check ComfyUI API format (each value should be a dict with class_type)
+    sample = next(iter(wf.values()), None)
+    if not isinstance(sample, dict) or "class_type" not in sample:
+        return False, "Not API format. In ComfyUI use 'Workflow → Export (API Format)'"
+    has_sampler = any(
+        n.get("class_type") in ("KSampler", "KSamplerAdvanced", "SamplerCustom")
+        for n in wf.values() if isinstance(n, dict)
+    )
+    if not has_sampler:
+        return False, "Workflow missing KSampler node"
+    has_save = any(
+        n.get("class_type") in ("SaveImage", "PreviewImage")
+        for n in wf.values() if isinstance(n, dict)
+    )
+    if not has_save:
+        return False, "Workflow missing SaveImage / PreviewImage node"
+    return True, "ok"
+
+
+def _inject_prompt(workflow: dict, prompt: str, seed: int) -> dict:
+    """
+    Inject user's prompt + random seed into a saved workflow.
+
+    Strategy:
+      1. Find every KSampler/KSamplerAdvanced node, randomize its seed
+      2. Trace its `positive` input back to a CLIPTextEncode node
+      3. If that node's text contains "{prompt}", replace the placeholder
+         (preserving any wrapper words like "masterpiece, {prompt}, hd")
+         Otherwise, replace the entire text with the user prompt
+    """
+    wf = copy.deepcopy(workflow)
+
+    sampler_ids = [
+        nid for nid, node in wf.items()
+        if isinstance(node, dict)
+        and node.get("class_type") in ("KSampler", "KSamplerAdvanced", "SamplerCustom")
+    ]
+
+    for sid in sampler_ids:
+        inputs = wf[sid].setdefault("inputs", {})
+        # Randomize seed
+        for key in ("seed", "noise_seed"):
+            if key in inputs:
+                inputs[key] = seed
+
+        # Trace positive prompt
+        pos_link = inputs.get("positive")
+        if isinstance(pos_link, list) and len(pos_link) >= 1:
+            pos_id = str(pos_link[0])
+            pos_node = wf.get(pos_id)
+            if (isinstance(pos_node, dict)
+                    and pos_node.get("class_type") == "CLIPTextEncode"):
+                current = pos_node.setdefault("inputs", {}).get("text", "")
+                if isinstance(current, str) and "{prompt}" in current:
+                    pos_node["inputs"]["text"] = current.replace("{prompt}", prompt)
+                else:
+                    pos_node["inputs"]["text"] = prompt
+
+    return wf
+
+
 # ── Workflow builder ──────────────────────────────────────────────────────────
 
 def _build_workflow(prompt: str, seed: int | None = None) -> dict:
-    """Build an SDXL-Turbo ComfyUI API workflow dict."""
+    """Build a ComfyUI API workflow dict.
+
+    If the user has uploaded a custom workflow, use that and inject the prompt
+    + seed into the right places. Otherwise fall back to the built-in default.
+    """
     if seed is None:
         seed = random.randint(0, 2 ** 32 - 1)
 
-    # Animagine XL 3.1 — anime-optimized SDXL model
-    # Falls back to SDXL Turbo if Animagine isn't installed
+    user_wf = _load_active_workflow()
+    if user_wf:
+        try:
+            return _inject_prompt(user_wf, prompt, seed)
+        except Exception as e:
+            print(f"[character_generator] Custom workflow injection failed: {e} — using default")
+
+    # ── Default: Animagine XL 3.1 (anime-optimized SDXL) ─────────────────────
     return {
         "4": {
             "class_type": "CheckpointLoaderSimple",

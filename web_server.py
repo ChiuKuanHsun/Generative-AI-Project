@@ -1046,6 +1046,80 @@ async def get_stats():
     }
 
 
+@app.get("/api/comfyui/default-workflow")
+async def get_default_workflow():
+    """Return the default ComfyUI workflow JSON (drag this into the editor)."""
+    # Bypass active workflow override — return only the built-in default
+    from character_generator import ACTIVE_WORKFLOW_PATH as _AWP
+    saved = None
+    if os.path.exists(_AWP):
+        os.rename(_AWP, _AWP + ".bak_tmp")
+        saved = _AWP + ".bak_tmp"
+    try:
+        from character_generator import _build_workflow
+        workflow = _build_workflow("1girl, solo, financial analyst, anime style, simple background")
+    finally:
+        if saved:
+            os.rename(saved, _AWP)
+    return workflow
+
+
+@app.get("/api/comfyui/workflow/info")
+async def get_workflow_info():
+    """Return info about the currently active (custom) workflow."""
+    from character_generator import ACTIVE_WORKFLOW_PATH as _AWP
+    if not os.path.exists(_AWP):
+        return {"active": False}
+    try:
+        with open(_AWP, encoding="utf-8") as f:
+            wf = json.load(f)
+        mtime = os.path.getmtime(_AWP)
+        node_types: dict[str, int] = {}
+        for n in wf.values():
+            if isinstance(n, dict):
+                t = n.get("class_type", "?")
+                node_types[t] = node_types.get(t, 0) + 1
+        return {
+            "active":     True,
+            "node_count": len(wf),
+            "modified":   datetime.fromtimestamp(mtime).isoformat(),
+            "node_types": node_types,
+        }
+    except Exception as exc:
+        return {"active": False, "error": str(exc)}
+
+
+@app.post("/api/comfyui/workflow")
+async def upload_workflow(file: UploadFile = File(...)):
+    """Upload a custom ComfyUI API-format workflow JSON."""
+    if not file.filename or not file.filename.lower().endswith(".json"):
+        raise HTTPException(400, "File must be a .json file")
+
+    content = await file.read()
+    try:
+        wf = json.loads(content.decode("utf-8"))
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+
+    from character_generator import validate_workflow, ACTIVE_WORKFLOW_PATH as _AWP
+    ok, reason = validate_workflow(wf)
+    if not ok:
+        raise HTTPException(400, reason)
+
+    with open(_AWP, "w", encoding="utf-8") as f:
+        json.dump(wf, f, ensure_ascii=False, indent=2)
+    return {"ok": True, "node_count": len(wf)}
+
+
+@app.delete("/api/comfyui/workflow")
+async def reset_workflow():
+    """Remove custom workflow, revert to built-in default."""
+    from character_generator import ACTIVE_WORKFLOW_PATH as _AWP
+    if os.path.exists(_AWP):
+        os.remove(_AWP)
+    return {"ok": True}
+
+
 # ── ComfyUI config endpoints ──────────────────────────────────────────────────
 
 @app.get("/api/config/comfyui")
